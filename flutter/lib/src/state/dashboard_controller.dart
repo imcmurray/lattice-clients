@@ -89,12 +89,15 @@ class DashboardController extends Notifier<DashboardState> {
       case LatticeEvent_Listening(:final ticket):
         state = state.copyWith(listening: true, ticket: ticket);
         _log(LogKind.signal, 'Online · accepting connections');
+        _syncForegroundService();
       case LatticeEvent_ListeningStopped():
         state = state.copyWith(listening: false);
         _log(LogKind.signal, 'Stopped listening');
+        _syncForegroundService();
       case LatticeEvent_PeerConnected(:final peerIdHex):
         state = state.copyWith(peers: {...state.peers, peerIdHex});
         _log(LogKind.peer, 'Secure session up · ${_short(peerIdHex)}');
+        _syncForegroundService();
         NotificationService.notifyBackground(
             'Peer connected', '${_short(peerIdHex)} · secure session up');
       case LatticeEvent_Resumed(:final peerIdHex):
@@ -112,6 +115,7 @@ class DashboardController extends Notifier<DashboardState> {
           links: {...state.links}..remove(peerIdHex),
         );
         _log(LogKind.peer, 'Session closed · ${_short(peerIdHex)}');
+        _syncForegroundService();
       case LatticeEvent_Message(:final peerIdHex, :final body):
         _log(LogKind.message, '${_short(peerIdHex)} » $body');
         NotificationService.notifyBackground('Message · ${_short(peerIdHex)}', body);
@@ -125,11 +129,21 @@ class DashboardController extends Notifier<DashboardState> {
     if (node == null) return;
     if (state.listening) {
       node.stopListening();
-      ForegroundService.stop(); // let the process be reclaimed when offline
     } else {
       _log(LogKind.info, 'Going online (contacting relay)…');
       node.startListening();
-      ForegroundService.start(); // keep the node alive in the background
+    }
+    // FGS state is reconciled from events (listening / peer connected).
+  }
+
+  /// Run the foreground service whenever the node needs to stay alive in the
+  /// background — listening, or holding at least one live peer session (so a
+  /// dialer-only connection survives backgrounding too).
+  void _syncForegroundService() {
+    if (state.listening || state.peers.isNotEmpty) {
+      ForegroundService.start();
+    } else {
+      ForegroundService.stop();
     }
   }
 
