@@ -7,6 +7,8 @@
     <!-- Foreground service keeps the P2P node alive in the background (Android 14+ typed FGS). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <!-- Lets the user exempt the app from Doze so background network survives. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <!-- Camera: scanning a peer's connect-ticket QR (now compact enough for QR). -->
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-feature android:name="android.hardware.camera" android:required="false"/>

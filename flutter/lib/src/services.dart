@@ -176,6 +176,14 @@ class ForegroundService {
 
   static Future<void> start() async {
     if (!_supported || await FlutterForegroundTask.isRunningService) return;
+    // Ask to be exempt from battery optimization (Doze): a foreground service
+    // keeps the process alive, but Doze still throttles its *network* — the
+    // exemption is what lets the connection stay up in the background.
+    try {
+      if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
+        await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+      }
+    } catch (_) {}
     await FlutterForegroundTask.startService(
       serviceId: 4242,
       notificationTitle: 'Lattice Node — online',
