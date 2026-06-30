@@ -180,6 +180,9 @@ class ForegroundService {
       serviceId: 4242,
       notificationTitle: 'Lattice Node — online',
       notificationText: 'Reachable for peer connections',
+      // Must match the manifest's foregroundServiceType; without it Android 14
+      // starts the service with no type and tears it down ("Stop FGS timeout").
+      serviceTypes: const [ForegroundServiceTypes.dataSync],
       callback: foregroundStartCallback,
     );
   }
