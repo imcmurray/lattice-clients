@@ -1,0 +1,95 @@
+# Lattice Clients
+
+Cross-platform client applications for the **[Lattice](https://github.com/imcmurray/lattice)
+peer-to-peer framework** — a security-forward, 100% Rust, post-quantum-hybrid P2P
+stack (the Holepunch/Keet model, redesigned). One Flutter codebase targets
+Android, Apple (iOS/macOS), Windows, and Arch Linux (Flutter's Linux desktop).
+
+> **Status: experimental · unaudited.** Working on **Android** and **Linux desktop**
+> today. Validated end-to-end on a real device: two nodes complete a post-quantum
+> hybrid handshake over the iroh relay path and exchange an encrypted message.
+
+## Built on Lattice
+
+This project is a **client** — it does not implement any cryptography or transport
+itself. All of that lives in the [**Lattice framework**](https://github.com/imcmurray/lattice):
+PQ-hybrid identity (Ed25519+ML-DSA, X25519+ML-KEM) with BIP39 recovery, a BLAKE3
+signed log, a hybrid-KEM + Double-Ratchet secure channel, and an iroh QUIC
+transport with relay + hole-punching. These clients are a Flutter UI over that
+audited core, bridged with [`flutter_rust_bridge`](https://github.com/fzyzcjy/flutter_rust_bridge).
+
+```
+Flutter UI (Dart, Material 3)
+        │  flutter_rust_bridge v2 (async fns + event Stream)
+        ▼
+flutter/rust/lattice-mobile     FFI-safe facade (LatticeNode + NodeEvent)
+        │  path dependency
+        ▼
+../Lattice/crates/lattice       the Lattice framework (PQ-hybrid · Double-Ratchet · iroh)
+```
+
+`lattice-mobile` exists because Flutter can't bridge Lattice's generic
+`ConnectedSession<C>` / async traits directly. It exposes one concrete
+`LatticeNode` that owns a tokio runtime, the iroh transport (bound lazily), and
+the live peer sessions, and emits a `NodeEvent` stream the UI subscribes to. Its
+wire preamble matches Lattice's `lattice-net` reference CLI, so the app
+interoperates with it.
+
+## First client: Lattice Node (control harness)
+
+A polished developer/operator harness that exercises every seam of the framework:
+
+- **Secure identity** — generate or recover a PQ-hybrid identity; the BIP39
+  mnemonic is age-encrypted at rest, its passphrase held in the platform keystore
+  (`flutter_secure_storage`) behind a biometric / device-credential gate
+  (`local_auth`), with graceful fallback where biometrics aren't available.
+- **Onboarding** — generate (reveal + confirm) or recover from a phrase.
+- **Instrument-panel dashboard** — fingerprint + copyable PeerId, an ONLINE power
+  toggle (binds iroh + accepts), a copyable connect ticket, paste-to-connect, a
+  live event console, and a per-peer encrypted send bar. Dark, mono crypto
+  readouts, with a live lattice-mesh that pulses teal when the node is online.
+
+## Requirements
+
+- The **Lattice framework** checked out as a sibling directory, so the path
+  dependency resolves:
+  ```
+  Development/
+  ├── Lattice/           # github.com/imcmurray/lattice
+  └── Lattice-Clients/   # this repo
+  ```
+- Flutter 3.44+, Rust (stable), and for Android: the SDK/NDK, the Rust Android
+  targets, `cargo-ndk`, and `flutter_rust_bridge_codegen`. See
+  [`docs/toolchain-setup.md`](docs/toolchain-setup.md).
+
+## Build & run
+
+```bash
+cd flutter
+flutter run -d linux                  # Linux desktop
+flutter run -d <android-device>       # phone — builds per-ABI .so via cargo-ndk
+flutter build apk --release --target-platform android-arm64   # sideloadable APK
+```
+
+If you change the Rust API, regenerate bindings:
+`flutter_rust_bridge_codegen generate && dart run build_runner build`.
+
+See [`docs/m2-testing.md`](docs/m2-testing.md) for the two-node test procedure.
+
+## Notes
+
+- A Lattice **connect ticket carries the node's post-quantum public keys (~26 KB)** —
+  far beyond a QR code's ~3 KB ceiling — so ticket exchange is copy/paste text, not
+  QR/scan. (Multi-frame QR or a serverless short-code rendezvous is a future option.)
+- Building for Android with Gradle 9 required patching the vendored cargokit to use
+  the injected `ExecOperations` service (Gradle 9 removed `Project.exec()`).
+
+## Acknowledgements
+
+- [**Lattice**](https://github.com/imcmurray/lattice) — the P2P framework this is built on.
+- [**flutter_rust_bridge**](https://github.com/fzyzcjy/flutter_rust_bridge) — Dart ⇄ Rust FFI.
+- [**iroh**](https://github.com/n0-computer/iroh) (n0) — QUIC transport, relays, hole-punching (via Lattice).
+
+## License
+
+[MIT](./LICENSE) © 2026 Ian McMurray.

@@ -1,0 +1,31 @@
+# Rust
+**/target/
+**/*.rs.bk
+
+# Flutter / Dart
+flutter/.dart_tool/
+flutter/.flutter-plugins
+flutter/.flutter-plugins-dependencies
+flutter/build/
+flutter/.idea/
+flutter/*.iml
+flutter/android/.gradle/
+flutter/android/local.properties
+flutter/android/app/.cxx/
+flutter/.gradle/
+
+# flutter_rust_bridge bindings ARE generated, but committed for buildability.
+
+# Secrets / identities (never commit a Lattice identity)
+**/identity.age
+**/identity.legacy.bak
+**/.lattice/
+
+# Never publish: Anthropic model/system-prompt scratch file.
+/CLAUDE-FABLE-5.md
+
+# Build artifacts
+*.apk
+
+# OS
+.DS_Store

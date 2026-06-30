@@ -1,0 +1,20 @@
+[package]
+name = "lattice_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.12.0"
+lattice-mobile = { path = "lattice-mobile" }
+futures = "0.3"
+
+# `lattice-mobile` is nested in this crate's dir; declare a workspace so cargo
+# doesn't try to fold it into the `lattice_bridge` package.
+[workspace]
+members = ["lattice-mobile"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

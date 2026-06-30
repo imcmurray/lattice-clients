@@ -1,0 +1,27 @@
+[package]
+name = "lattice-mobile"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "FFI-safe facade over the Lattice P2P framework for Flutter clients (Android/iOS/desktop)."
+
+# cdylib + staticlib for the native libraries linked into Flutter (Android .so,
+# iOS/macOS .a, Windows .dll, Linux .so); `lib` so `cargo check`/tests work on host.
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+# The real Lattice core — single source of truth for all crypto + transport.
+# Path dependency into the sibling Lattice workspace (local-only git).
+# `storage` is intentionally NOT enabled: it pulls keyring -> secret-service/dbus
+# (painful on Android). We do our own age-passphrase identity file instead, and
+# keep the passphrase in the platform keystore on the Dart side.
+lattice = { path = "../../../../Lattice/crates/lattice", features = ["iroh"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
+hex = "0.4"
+# age 0.11 to match Lattice's own at-rest format; zeroize to wipe the mnemonic.
+age = "0.11"
+zeroize = "1"
+
+# flutter_rust_bridge codegen layer is added in M1 once the host facade is green:
+# flutter_rust_bridge = "2"
