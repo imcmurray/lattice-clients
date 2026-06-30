@@ -2,9 +2,8 @@
     <!-- iroh QUIC transport needs network access for relay discovery + holepunch. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-    <!-- Camera is used only for scanning connect-ticket QR codes; not required. -->
-    <uses-permission android:name="android.permission.CAMERA"/>
-    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <!-- Post system notifications for incoming messages / peer activity (API 33+ runtime prompt). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="lattice_node"
         android:name="${applicationName}"

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:path_provider/path_provider.dart';
@@ -70,5 +71,70 @@ class AuthService {
       // No usable auth on this platform — fall through to the keystore layer.
       return true;
     }
+  }
+}
+
+/// System notifications for node activity (incoming messages, peer connections).
+///
+/// Local notifications only — Lattice is serverless, so events come from the
+/// on-device node, not a push backend. We notify only while the app is *not*
+/// foreground (no point popping a banner over the screen you're looking at).
+/// True delivery while the app is killed needs a foreground service (future).
+class NotificationService {
+  NotificationService._();
+
+  static final FlutterLocalNotificationsPlugin _plugin =
+      FlutterLocalNotificationsPlugin();
+  static bool _ready = false;
+  static int _id = 0;
+  static const String _channelId = 'lattice_events';
+  static const String _channelName = 'Lattice activity';
+
+  /// Updated by the app's lifecycle observer; we only notify when false.
+  static bool appResumed = true;
+
+  static Future<void> init() async {
+    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const linux = LinuxInitializationSettings(defaultActionName: 'Open');
+    const settings = InitializationSettings(android: android, linux: linux);
+    try {
+      await _plugin.initialize(settings: settings);
+      final androidImpl = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      await androidImpl
+          ?.createNotificationChannel(const AndroidNotificationChannel(
+        _channelId,
+        _channelName,
+        description: 'Incoming messages and peer connections',
+        importance: Importance.high,
+      ));
+      await androidImpl?.requestNotificationsPermission();
+      _ready = true;
+    } catch (_) {
+      _ready = false; // unsupported platform — silently no-op
+    }
+  }
+
+  /// Post a notification, but only when the app is backgrounded.
+  static Future<void> notifyBackground(String title, String body) async {
+    if (!_ready || appResumed) return;
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _channelId,
+        _channelName,
+        importance: Importance.high,
+        priority: Priority.high,
+      ),
+      linux: LinuxNotificationDetails(),
+    );
+    _id = (_id + 1) % 100000;
+    try {
+      await _plugin.show(
+        id: _id,
+        title: title,
+        body: body,
+        notificationDetails: details,
+      );
+    } catch (_) {}
   }
 }

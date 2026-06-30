@@ -3,12 +3,36 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'screens/dashboard_screen.dart';
 import 'screens/onboarding.dart';
+import 'services.dart';
 import 'state/app_controller.dart';
 import 'theme.dart';
 import 'widgets/ui.dart';
 
-class LatticeApp extends StatelessWidget {
+class LatticeApp extends StatefulWidget {
   const LatticeApp({super.key});
+
+  @override
+  State<LatticeApp> createState() => _LatticeAppState();
+}
+
+class _LatticeAppState extends State<LatticeApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Notifications fire only while backgrounded (see NotificationService).
+    NotificationService.appResumed = state == AppLifecycleState.resumed;
+  }
 
   @override
   Widget build(BuildContext context) {

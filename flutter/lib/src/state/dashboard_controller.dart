@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../rust/api/node.dart';
+import '../services.dart';
 import '../theme.dart';
 import 'app_controller.dart';
 
@@ -94,6 +95,8 @@ class DashboardController extends Notifier<DashboardState> {
       case LatticeEvent_PeerConnected(:final peerIdHex):
         state = state.copyWith(peers: {...state.peers, peerIdHex});
         _log(LogKind.peer, 'Secure session up · ${_short(peerIdHex)}');
+        NotificationService.notifyBackground(
+            'Peer connected', '${_short(peerIdHex)} · secure session up');
       case LatticeEvent_Resumed(:final peerIdHex):
         _log(LogKind.signal, 'Resumed without re-handshake · ${_short(peerIdHex)}');
       case LatticeEvent_Reconnecting(:final peerIdHex):
@@ -111,6 +114,7 @@ class DashboardController extends Notifier<DashboardState> {
         _log(LogKind.peer, 'Session closed · ${_short(peerIdHex)}');
       case LatticeEvent_Message(:final peerIdHex, :final body):
         _log(LogKind.message, '${_short(peerIdHex)} » $body');
+        NotificationService.notifyBackground('Message · ${_short(peerIdHex)}', body);
       case LatticeEvent_Error(:final message):
         _log(LogKind.error, message);
     }
