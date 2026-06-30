@@ -395,12 +395,18 @@ class _SendBarState extends State<_SendBar> {
 
 /// The PQ-hybrid ticket carries kilobytes of public keys, so it cannot fit in a
 /// QR code — it's shared as copyable text.
-class _TicketDialog extends StatelessWidget {
+class _TicketDialog extends ConsumerWidget {
   const _TicketDialog({required this.ticket});
   final String ticket;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Auto-dismiss once a peer connects — the ticket has done its job.
+    ref.listen<int>(dashboardProvider.select((s) => s.peers.length), (prev, next) {
+      if ((prev ?? 0) < next) {
+        Navigator.of(context).maybePop();
+      }
+    });
     return Dialog(
       backgroundColor: Lx.raised,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
