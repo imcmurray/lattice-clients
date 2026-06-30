@@ -125,9 +125,11 @@ class DashboardController extends Notifier<DashboardState> {
     if (node == null) return;
     if (state.listening) {
       node.stopListening();
+      ForegroundService.stop(); // let the process be reclaimed when offline
     } else {
       _log(LogKind.info, 'Going online (contacting relay)…');
       node.startListening();
+      ForegroundService.start(); // keep the node alive in the background
     }
   }
 

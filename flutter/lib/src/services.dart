@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
@@ -137,4 +138,73 @@ class NotificationService {
       );
     } catch (_) {}
   }
+}
+
+/// Foreground service that keeps the P2P node alive while the app is
+/// backgrounded. Android freezes cached processes within seconds, which stops
+/// the iroh node entirely — a typed foreground service (dataSync) exempts the
+/// process from freezing so messages keep arriving and notifications fire.
+///
+/// Tied to the ONLINE toggle: started when the node goes online, stopped when
+/// it goes offline. Swiping the app away stops the service (and the node) — a
+/// node running in the UI isolate can't outlive the activity.
+class ForegroundService {
+  ForegroundService._();
+
+  static bool get _supported => Platform.isAndroid || Platform.isIOS;
+
+  static void init() {
+    if (!_supported) return;
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'lattice_service',
+        channelName: 'Lattice node',
+        channelDescription: 'Keeps your node online in the background',
+        channelImportance: NotificationChannelImportance.LOW,
+        priority: NotificationPriority.LOW,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(),
+      foregroundTaskOptions: ForegroundTaskOptions(
+        eventAction: ForegroundTaskEventAction.nothing(),
+        autoRunOnBoot: false,
+        allowWakeLock: true,
+        allowWifiLock: true,
+        stopWithTask: true,
+      ),
+    );
+  }
+
+  static Future<void> start() async {
+    if (!_supported || await FlutterForegroundTask.isRunningService) return;
+    await FlutterForegroundTask.startService(
+      serviceId: 4242,
+      notificationTitle: 'Lattice Node — online',
+      notificationText: 'Reachable for peer connections',
+      callback: foregroundStartCallback,
+    );
+  }
+
+  static Future<void> stop() async {
+    if (!_supported || !await FlutterForegroundTask.isRunningService) return;
+    await FlutterForegroundTask.stopService();
+  }
+}
+
+/// Entry point for the foreground service's task isolate. The node itself runs
+/// in the main isolate (kept alive by the service); this handler is a no-op
+/// placeholder the plugin requires.
+@pragma('vm:entry-point')
+void foregroundStartCallback() {
+  FlutterForegroundTask.setTaskHandler(_LatticeTaskHandler());
+}
+
+class _LatticeTaskHandler extends TaskHandler {
+  @override
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+
+  @override
+  void onRepeatEvent(DateTime timestamp) {}
+
+  @override
+  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
 }

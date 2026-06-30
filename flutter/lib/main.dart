@@ -9,5 +9,6 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
   await NotificationService.init();
+  ForegroundService.init();
   runApp(const ProviderScope(child: LatticeApp()));
 }
