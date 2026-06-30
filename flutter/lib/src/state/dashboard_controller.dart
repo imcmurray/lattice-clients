@@ -164,6 +164,14 @@ class DashboardController extends Notifier<DashboardState> {
     final node = _node;
     final t = ticket.trim();
     if (node == null || t.isEmpty) return;
+    // Go online when we dial: a listening node makes iroh actively maintain its
+    // relay link (to stay reachable), which keeps the connection warm in the
+    // background — the difference between a dialer-only node (relay idles out,
+    // no background delivery) and a listener (stays reachable, notifications fire).
+    if (!state.listening) {
+      _log(LogKind.info, 'Going online…');
+      node.startListening();
+    }
     _log(LogKind.info, 'Dialing peer…');
     node.connect(ticket: t);
   }
