@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../state/dashboard_controller.dart';
 import '../theme.dart';
@@ -355,6 +356,13 @@ class _TicketDialog extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   TextButton.icon(
+                    onPressed: () => SharePlus.instance.share(
+                      ShareParams(text: ticket, subject: 'Lattice connect ticket'),
+                    ),
+                    icon: const Icon(Icons.ios_share_rounded, size: 16, color: Lx.teal),
+                    label: Text('Share', style: mono(size: 12, color: Lx.teal)),
+                  ),
+                  TextButton.icon(
                     onPressed: () {
                       Clipboard.setData(ClipboardData(text: ticket));
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -362,7 +370,7 @@ class _TicketDialog extends StatelessWidget {
                       );
                     },
                     icon: const Icon(Icons.content_copy_rounded, size: 16, color: Lx.teal),
-                    label: Text('Copy ticket', style: mono(size: 12, color: Lx.teal)),
+                    label: Text('Copy', style: mono(size: 12, color: Lx.teal)),
                   ),
                   const SizedBox(width: 8),
                   FilledButton(

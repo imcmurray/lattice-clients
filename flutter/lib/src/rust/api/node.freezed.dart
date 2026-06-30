@@ -55,13 +55,15 @@ extension LatticeEventPatterns on LatticeEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( LatticeEvent_Listening value)?  listening,TResult Function( LatticeEvent_ListeningStopped value)?  listeningStopped,TResult Function( LatticeEvent_PeerConnected value)?  peerConnected,TResult Function( LatticeEvent_Message value)?  message,TResult Function( LatticeEvent_PeerDisconnected value)?  peerDisconnected,TResult Function( LatticeEvent_Error value)?  error,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( LatticeEvent_Listening value)?  listening,TResult Function( LatticeEvent_ListeningStopped value)?  listeningStopped,TResult Function( LatticeEvent_PeerConnected value)?  peerConnected,TResult Function( LatticeEvent_Resumed value)?  resumed,TResult Function( LatticeEvent_Reconnecting value)?  reconnecting,TResult Function( LatticeEvent_Message value)?  message,TResult Function( LatticeEvent_PeerDisconnected value)?  peerDisconnected,TResult Function( LatticeEvent_Error value)?  error,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case LatticeEvent_Listening() when listening != null:
 return listening(_that);case LatticeEvent_ListeningStopped() when listeningStopped != null:
 return listeningStopped(_that);case LatticeEvent_PeerConnected() when peerConnected != null:
-return peerConnected(_that);case LatticeEvent_Message() when message != null:
+return peerConnected(_that);case LatticeEvent_Resumed() when resumed != null:
+return resumed(_that);case LatticeEvent_Reconnecting() when reconnecting != null:
+return reconnecting(_that);case LatticeEvent_Message() when message != null:
 return message(_that);case LatticeEvent_PeerDisconnected() when peerDisconnected != null:
 return peerDisconnected(_that);case LatticeEvent_Error() when error != null:
 return error(_that);case _:
@@ -82,13 +84,15 @@ return error(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( LatticeEvent_Listening value)  listening,required TResult Function( LatticeEvent_ListeningStopped value)  listeningStopped,required TResult Function( LatticeEvent_PeerConnected value)  peerConnected,required TResult Function( LatticeEvent_Message value)  message,required TResult Function( LatticeEvent_PeerDisconnected value)  peerDisconnected,required TResult Function( LatticeEvent_Error value)  error,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( LatticeEvent_Listening value)  listening,required TResult Function( LatticeEvent_ListeningStopped value)  listeningStopped,required TResult Function( LatticeEvent_PeerConnected value)  peerConnected,required TResult Function( LatticeEvent_Resumed value)  resumed,required TResult Function( LatticeEvent_Reconnecting value)  reconnecting,required TResult Function( LatticeEvent_Message value)  message,required TResult Function( LatticeEvent_PeerDisconnected value)  peerDisconnected,required TResult Function( LatticeEvent_Error value)  error,}){
 final _that = this;
 switch (_that) {
 case LatticeEvent_Listening():
 return listening(_that);case LatticeEvent_ListeningStopped():
 return listeningStopped(_that);case LatticeEvent_PeerConnected():
-return peerConnected(_that);case LatticeEvent_Message():
+return peerConnected(_that);case LatticeEvent_Resumed():
+return resumed(_that);case LatticeEvent_Reconnecting():
+return reconnecting(_that);case LatticeEvent_Message():
 return message(_that);case LatticeEvent_PeerDisconnected():
 return peerDisconnected(_that);case LatticeEvent_Error():
 return error(_that);}
@@ -105,13 +109,15 @@ return error(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( LatticeEvent_Listening value)?  listening,TResult? Function( LatticeEvent_ListeningStopped value)?  listeningStopped,TResult? Function( LatticeEvent_PeerConnected value)?  peerConnected,TResult? Function( LatticeEvent_Message value)?  message,TResult? Function( LatticeEvent_PeerDisconnected value)?  peerDisconnected,TResult? Function( LatticeEvent_Error value)?  error,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( LatticeEvent_Listening value)?  listening,TResult? Function( LatticeEvent_ListeningStopped value)?  listeningStopped,TResult? Function( LatticeEvent_PeerConnected value)?  peerConnected,TResult? Function( LatticeEvent_Resumed value)?  resumed,TResult? Function( LatticeEvent_Reconnecting value)?  reconnecting,TResult? Function( LatticeEvent_Message value)?  message,TResult? Function( LatticeEvent_PeerDisconnected value)?  peerDisconnected,TResult? Function( LatticeEvent_Error value)?  error,}){
 final _that = this;
 switch (_that) {
 case LatticeEvent_Listening() when listening != null:
 return listening(_that);case LatticeEvent_ListeningStopped() when listeningStopped != null:
 return listeningStopped(_that);case LatticeEvent_PeerConnected() when peerConnected != null:
-return peerConnected(_that);case LatticeEvent_Message() when message != null:
+return peerConnected(_that);case LatticeEvent_Resumed() when resumed != null:
+return resumed(_that);case LatticeEvent_Reconnecting() when reconnecting != null:
+return reconnecting(_that);case LatticeEvent_Message() when message != null:
 return message(_that);case LatticeEvent_PeerDisconnected() when peerDisconnected != null:
 return peerDisconnected(_that);case LatticeEvent_Error() when error != null:
 return error(_that);case _:
@@ -131,12 +137,14 @@ return error(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String ticket)?  listening,TResult Function()?  listeningStopped,TResult Function( String peerIdHex)?  peerConnected,TResult Function( String peerIdHex,  String body)?  message,TResult Function( String peerIdHex)?  peerDisconnected,TResult Function( String message)?  error,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( String ticket)?  listening,TResult Function()?  listeningStopped,TResult Function( String peerIdHex)?  peerConnected,TResult Function( String peerIdHex)?  resumed,TResult Function( String peerIdHex)?  reconnecting,TResult Function( String peerIdHex,  String body)?  message,TResult Function( String peerIdHex)?  peerDisconnected,TResult Function( String message)?  error,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case LatticeEvent_Listening() when listening != null:
 return listening(_that.ticket);case LatticeEvent_ListeningStopped() when listeningStopped != null:
 return listeningStopped();case LatticeEvent_PeerConnected() when peerConnected != null:
-return peerConnected(_that.peerIdHex);case LatticeEvent_Message() when message != null:
+return peerConnected(_that.peerIdHex);case LatticeEvent_Resumed() when resumed != null:
+return resumed(_that.peerIdHex);case LatticeEvent_Reconnecting() when reconnecting != null:
+return reconnecting(_that.peerIdHex);case LatticeEvent_Message() when message != null:
 return message(_that.peerIdHex,_that.body);case LatticeEvent_PeerDisconnected() when peerDisconnected != null:
 return peerDisconnected(_that.peerIdHex);case LatticeEvent_Error() when error != null:
 return error(_that.message);case _:
@@ -157,12 +165,14 @@ return error(_that.message);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String ticket)  listening,required TResult Function()  listeningStopped,required TResult Function( String peerIdHex)  peerConnected,required TResult Function( String peerIdHex,  String body)  message,required TResult Function( String peerIdHex)  peerDisconnected,required TResult Function( String message)  error,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( String ticket)  listening,required TResult Function()  listeningStopped,required TResult Function( String peerIdHex)  peerConnected,required TResult Function( String peerIdHex)  resumed,required TResult Function( String peerIdHex)  reconnecting,required TResult Function( String peerIdHex,  String body)  message,required TResult Function( String peerIdHex)  peerDisconnected,required TResult Function( String message)  error,}) {final _that = this;
 switch (_that) {
 case LatticeEvent_Listening():
 return listening(_that.ticket);case LatticeEvent_ListeningStopped():
 return listeningStopped();case LatticeEvent_PeerConnected():
-return peerConnected(_that.peerIdHex);case LatticeEvent_Message():
+return peerConnected(_that.peerIdHex);case LatticeEvent_Resumed():
+return resumed(_that.peerIdHex);case LatticeEvent_Reconnecting():
+return reconnecting(_that.peerIdHex);case LatticeEvent_Message():
 return message(_that.peerIdHex,_that.body);case LatticeEvent_PeerDisconnected():
 return peerDisconnected(_that.peerIdHex);case LatticeEvent_Error():
 return error(_that.message);}
@@ -179,12 +189,14 @@ return error(_that.message);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String ticket)?  listening,TResult? Function()?  listeningStopped,TResult? Function( String peerIdHex)?  peerConnected,TResult? Function( String peerIdHex,  String body)?  message,TResult? Function( String peerIdHex)?  peerDisconnected,TResult? Function( String message)?  error,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( String ticket)?  listening,TResult? Function()?  listeningStopped,TResult? Function( String peerIdHex)?  peerConnected,TResult? Function( String peerIdHex)?  resumed,TResult? Function( String peerIdHex)?  reconnecting,TResult? Function( String peerIdHex,  String body)?  message,TResult? Function( String peerIdHex)?  peerDisconnected,TResult? Function( String message)?  error,}) {final _that = this;
 switch (_that) {
 case LatticeEvent_Listening() when listening != null:
 return listening(_that.ticket);case LatticeEvent_ListeningStopped() when listeningStopped != null:
 return listeningStopped();case LatticeEvent_PeerConnected() when peerConnected != null:
-return peerConnected(_that.peerIdHex);case LatticeEvent_Message() when message != null:
+return peerConnected(_that.peerIdHex);case LatticeEvent_Resumed() when resumed != null:
+return resumed(_that.peerIdHex);case LatticeEvent_Reconnecting() when reconnecting != null:
+return reconnecting(_that.peerIdHex);case LatticeEvent_Message() when message != null:
 return message(_that.peerIdHex,_that.body);case LatticeEvent_PeerDisconnected() when peerDisconnected != null:
 return peerDisconnected(_that.peerIdHex);case LatticeEvent_Error() when error != null:
 return error(_that.message);case _:
@@ -351,6 +363,138 @@ class _$LatticeEvent_PeerConnectedCopyWithImpl<$Res>
 /// with the given fields replaced by the non-null parameter values.
 @pragma('vm:prefer-inline') $Res call({Object? peerIdHex = null,}) {
   return _then(LatticeEvent_PeerConnected(
+peerIdHex: null == peerIdHex ? _self.peerIdHex : peerIdHex // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class LatticeEvent_Resumed extends LatticeEvent {
+  const LatticeEvent_Resumed({required this.peerIdHex}): super._();
+  
+
+ final  String peerIdHex;
+
+/// Create a copy of LatticeEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$LatticeEvent_ResumedCopyWith<LatticeEvent_Resumed> get copyWith => _$LatticeEvent_ResumedCopyWithImpl<LatticeEvent_Resumed>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is LatticeEvent_Resumed&&(identical(other.peerIdHex, peerIdHex) || other.peerIdHex == peerIdHex));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,peerIdHex);
+
+@override
+String toString() {
+  return 'LatticeEvent.resumed(peerIdHex: $peerIdHex)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $LatticeEvent_ResumedCopyWith<$Res> implements $LatticeEventCopyWith<$Res> {
+  factory $LatticeEvent_ResumedCopyWith(LatticeEvent_Resumed value, $Res Function(LatticeEvent_Resumed) _then) = _$LatticeEvent_ResumedCopyWithImpl;
+@useResult
+$Res call({
+ String peerIdHex
+});
+
+
+
+
+}
+/// @nodoc
+class _$LatticeEvent_ResumedCopyWithImpl<$Res>
+    implements $LatticeEvent_ResumedCopyWith<$Res> {
+  _$LatticeEvent_ResumedCopyWithImpl(this._self, this._then);
+
+  final LatticeEvent_Resumed _self;
+  final $Res Function(LatticeEvent_Resumed) _then;
+
+/// Create a copy of LatticeEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? peerIdHex = null,}) {
+  return _then(LatticeEvent_Resumed(
+peerIdHex: null == peerIdHex ? _self.peerIdHex : peerIdHex // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class LatticeEvent_Reconnecting extends LatticeEvent {
+  const LatticeEvent_Reconnecting({required this.peerIdHex}): super._();
+  
+
+ final  String peerIdHex;
+
+/// Create a copy of LatticeEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$LatticeEvent_ReconnectingCopyWith<LatticeEvent_Reconnecting> get copyWith => _$LatticeEvent_ReconnectingCopyWithImpl<LatticeEvent_Reconnecting>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is LatticeEvent_Reconnecting&&(identical(other.peerIdHex, peerIdHex) || other.peerIdHex == peerIdHex));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,peerIdHex);
+
+@override
+String toString() {
+  return 'LatticeEvent.reconnecting(peerIdHex: $peerIdHex)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $LatticeEvent_ReconnectingCopyWith<$Res> implements $LatticeEventCopyWith<$Res> {
+  factory $LatticeEvent_ReconnectingCopyWith(LatticeEvent_Reconnecting value, $Res Function(LatticeEvent_Reconnecting) _then) = _$LatticeEvent_ReconnectingCopyWithImpl;
+@useResult
+$Res call({
+ String peerIdHex
+});
+
+
+
+
+}
+/// @nodoc
+class _$LatticeEvent_ReconnectingCopyWithImpl<$Res>
+    implements $LatticeEvent_ReconnectingCopyWith<$Res> {
+  _$LatticeEvent_ReconnectingCopyWithImpl(this._self, this._then);
+
+  final LatticeEvent_Reconnecting _self;
+  final $Res Function(LatticeEvent_Reconnecting) _then;
+
+/// Create a copy of LatticeEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? peerIdHex = null,}) {
+  return _then(LatticeEvent_Reconnecting(
 peerIdHex: null == peerIdHex ? _self.peerIdHex : peerIdHex // ignore: cast_nullable_to_non_nullable
 as String,
   ));

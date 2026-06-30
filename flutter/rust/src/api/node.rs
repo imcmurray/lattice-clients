@@ -207,6 +207,8 @@ pub enum LatticeEvent {
     Listening { ticket: String },
     ListeningStopped,
     PeerConnected { peer_id_hex: String },
+    Resumed { peer_id_hex: String },
+    Reconnecting { peer_id_hex: String },
     Message { peer_id_hex: String, body: String },
     PeerDisconnected { peer_id_hex: String },
     Error { message: String },
@@ -218,6 +220,8 @@ impl From<NodeEvent> for LatticeEvent {
             NodeEvent::Listening { ticket } => LatticeEvent::Listening { ticket },
             NodeEvent::ListeningStopped => LatticeEvent::ListeningStopped,
             NodeEvent::PeerConnected { peer_id_hex } => LatticeEvent::PeerConnected { peer_id_hex },
+            NodeEvent::Resumed { peer_id_hex } => LatticeEvent::Resumed { peer_id_hex },
+            NodeEvent::Reconnecting { peer_id_hex } => LatticeEvent::Reconnecting { peer_id_hex },
             NodeEvent::Message { peer_id_hex, body } => LatticeEvent::Message { peer_id_hex, body },
             NodeEvent::PeerDisconnected { peer_id_hex } => {
                 LatticeEvent::PeerDisconnected { peer_id_hex }

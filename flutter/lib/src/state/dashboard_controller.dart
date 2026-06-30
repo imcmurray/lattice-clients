@@ -83,6 +83,10 @@ class DashboardController extends Notifier<DashboardState> {
       case LatticeEvent_PeerConnected(:final peerIdHex):
         state = state.copyWith(peers: {...state.peers, peerIdHex});
         _log(LogKind.peer, 'Secure session up · ${_short(peerIdHex)}');
+      case LatticeEvent_Resumed(:final peerIdHex):
+        _log(LogKind.signal, 'Resumed without re-handshake · ${_short(peerIdHex)}');
+      case LatticeEvent_Reconnecting(:final peerIdHex):
+        _log(LogKind.info, 'Reconnecting to ${_short(peerIdHex)}…');
       case LatticeEvent_PeerDisconnected(:final peerIdHex):
         state = state.copyWith(peers: {...state.peers}..remove(peerIdHex));
         _log(LogKind.peer, 'Session closed · ${_short(peerIdHex)}');

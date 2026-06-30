@@ -101,6 +101,10 @@ sealed class LatticeEvent with _$LatticeEvent {
   const factory LatticeEvent.listeningStopped() = LatticeEvent_ListeningStopped;
   const factory LatticeEvent.peerConnected({required String peerIdHex}) =
       LatticeEvent_PeerConnected;
+  const factory LatticeEvent.resumed({required String peerIdHex}) =
+      LatticeEvent_Resumed;
+  const factory LatticeEvent.reconnecting({required String peerIdHex}) =
+      LatticeEvent_Reconnecting;
   const factory LatticeEvent.message({
     required String peerIdHex,
     required String body,

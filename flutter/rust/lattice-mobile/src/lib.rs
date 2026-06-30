@@ -29,9 +29,12 @@ use zeroize::Zeroizing;
 /// 32-byte PeerId, used as the session map key.
 type PeerKey = [u8; 32];
 
-// Connection preamble (matches lattice-net): a fresh handshake every time in v0.x.
+// Connection preamble (matches lattice-net): the dialer's first frame is
+// [mode] ++ its identity bundle; the listener replies with one decision byte.
 const MODE_FRESH: u8 = 0;
+const MODE_RESUME: u8 = 1;
 const DECISION_FRESH: u8 = 0;
+const DECISION_RESUMED: u8 = 1;
 const IDENTITY_FILE: &str = "identity.age";
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -164,8 +167,12 @@ pub enum NodeEvent {
     Listening { ticket: String },
     /// The accept loop was stopped (listen toggle off).
     ListeningStopped,
-    /// A secure session was established with a peer.
+    /// A secure session was established with a peer (fresh handshake).
     PeerConnected { peer_id_hex: String },
+    /// A dropped session was resumed without re-handshaking (ratchet preserved).
+    Resumed { peer_id_hex: String },
+    /// The dialer lost a peer and is retrying (with resume on success).
+    Reconnecting { peer_id_hex: String },
     /// A decrypted application message arrived.
     Message { peer_id_hex: String, body: String },
     /// A peer's session ended (transport drop or local teardown).
@@ -182,6 +189,9 @@ pub struct LatticeNode {
     transport: Arc<Mutex<Option<Arc<IrohTransport>>>>,
     peers: Arc<Mutex<HashMap<PeerKey, mpsc::UnboundedSender<Vec<u8>>>>>,
     listen_task: Arc<Mutex<Option<AbortHandle>>>,
+    /// Ratchet sessions kept across drops so a reconnecting peer can resume
+    /// without a fresh handshake (the listener side of resumption).
+    kept: Arc<Mutex<HashMap<PeerKey, SecureSession>>>,
     events_tx: mpsc::UnboundedSender<NodeEvent>,
     events_rx: Mutex<Option<mpsc::UnboundedReceiver<NodeEvent>>>,
 }
@@ -198,6 +208,7 @@ impl LatticeNode {
             transport: Arc::new(Mutex::new(None)),
             peers: Arc::new(Mutex::new(HashMap::new())),
             listen_task: Arc::new(Mutex::new(None)),
+            kept: Arc::new(Mutex::new(HashMap::new())),
             events_tx,
             events_rx: Mutex::new(Some(events_rx)),
         }))
@@ -296,14 +307,12 @@ impl LatticeNode {
         });
     }
 
-    /// Dial a peer by ticket in the background (binds the transport if needed).
+    /// Dial a peer by ticket and keep the session alive across drops: on a
+    /// disconnect it re-dials with resume (falling back to a fresh handshake if
+    /// the peer can't resume), with exponential backoff while unreachable.
     pub fn connect(self: &Arc<Self>, ticket: String) {
         let node = Arc::clone(self);
-        runtime().spawn(async move {
-            if let Err(e) = Arc::clone(&node).dial(ticket).await {
-                node.emit_err(format!("connect: {e}"));
-            }
-        });
+        runtime().spawn(async move { node.dial_loop(ticket).await });
     }
 
     /// Send a UTF-8 message to a connected peer (by hex PeerId).
@@ -320,6 +329,9 @@ impl LatticeNode {
 
     // --- internals ---------------------------------------------------------
 
+    /// Responder: read the dialer's preamble, resume a kept session if asked and
+    /// available, else run a fresh handshake. Keeps the recovered session for a
+    /// future resume.
     async fn handle_incoming(self: Arc<Self>, mut conn: IrohConn) {
         let preamble = match conn.recv().await {
             Ok(p) => p,
@@ -328,38 +340,107 @@ impl LatticeNode {
         if preamble.is_empty() {
             return self.emit_err("empty preamble".into());
         }
+        let mode = preamble[0];
         let peer = match PublicIdentity::from_bytes(&preamble[1..]) {
             Ok(p) => p,
             Err(e) => return self.emit_err(format!("bad peer identity: {e}")),
         };
-        if conn.send(&[DECISION_FRESH]).await.is_err() {
-            return;
-        }
-        match ConnectedSession::accept(conn, self.me.as_ref(), &peer).await {
-            Ok(cs) => self.run_session(peer, cs).await,
-            Err(e) => self.emit_err(format!("handshake: {e}")),
+        let key = peer.peer_id().0;
+        let hex = hex::encode(key);
+
+        let resumable = if mode == MODE_RESUME {
+            self.kept.lock().await.remove(&key)
+        } else {
+            self.kept.lock().await.remove(&key); // drop any stale session
+            None
+        };
+
+        let cs = if let Some(sess) = resumable {
+            if conn.send(&[DECISION_RESUMED]).await.is_err() {
+                return;
+            }
+            let _ = self.events_tx.send(NodeEvent::Resumed { peer_id_hex: hex });
+            ConnectedSession::resume(conn, sess)
+        } else {
+            if conn.send(&[DECISION_FRESH]).await.is_err() {
+                return;
+            }
+            match ConnectedSession::accept(conn, self.me.as_ref(), &peer).await {
+                Ok(cs) => cs,
+                Err(e) => return self.emit_err(format!("handshake: {e}")),
+            }
+        };
+
+        if let Some(recovered) = self.run_session(peer, cs).await {
+            self.kept.lock().await.insert(key, recovered);
         }
     }
 
-    async fn dial(self: Arc<Self>, ticket: String) -> Result<()> {
-        let t = self.ensure_online().await?;
-        let (peer_bytes, mut conn) = t.connect_ticket(&ticket).await?;
-        let peer = PublicIdentity::from_bytes(&peer_bytes)?;
+    /// Dialer reconnect loop for one ticket. Returns never (runs until the node
+    /// is dropped); each iteration dials, runs the session, then re-dials.
+    async fn dial_loop(self: Arc<Self>, ticket: String) {
+        let mut kept: Option<SecureSession> = None;
+        let mut backoff = 1u64;
+        loop {
+            match self.dial_once(&ticket, &mut kept).await {
+                Ok(peer_hex) => {
+                    backoff = 1;
+                    let _ = self
+                        .events_tx
+                        .send(NodeEvent::Reconnecting { peer_id_hex: peer_hex });
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    self.emit_err(format!("connect: {e} — retrying in {backoff}s"));
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(30);
+                }
+            }
+        }
+    }
 
-        let mut preamble = vec![MODE_FRESH];
+    /// One dial: negotiate resume-vs-fresh, run the session, stash the recovered
+    /// ratchet into `kept` for the next attempt. Returns the peer's hex id.
+    async fn dial_once(&self, ticket: &str, kept: &mut Option<SecureSession>) -> Result<String> {
+        let t = self.ensure_online().await?;
+        let (peer_bytes, mut conn) = t.connect_ticket(ticket).await?;
+        let peer = PublicIdentity::from_bytes(&peer_bytes)?;
+        let hex = hex::encode(peer.peer_id().0);
+
+        let mode = if kept.is_some() { MODE_RESUME } else { MODE_FRESH };
+        let mut preamble = vec![mode];
         preamble.extend_from_slice(&self.me.public().to_bytes());
         conn.send(&preamble).await?;
-        let _decision = conn.recv().await?; // v0.x: always fresh
+        let decision = conn.recv().await?;
+        let resumed = decision.first() == Some(&DECISION_RESUMED);
 
-        let cs = ConnectedSession::initiate(conn, self.me.as_ref(), &peer).await?;
-        self.run_session(peer, cs).await;
-        Ok(())
+        let cs = if resumed {
+            let sess = kept
+                .take()
+                .ok_or_else(|| Error::Other("resume decision without a kept session".into()))?;
+            let _ = self
+                .events_tx
+                .send(NodeEvent::Resumed { peer_id_hex: hex.clone() });
+            ConnectedSession::resume(conn, sess)
+        } else {
+            let _ = kept.take(); // peer couldn't resume — drop stale, go fresh
+            ConnectedSession::initiate(conn, self.me.as_ref(), &peer).await?
+        };
+
+        *kept = self.run_session(peer, cs).await;
+        Ok(hex)
     }
 
     /// Full-duplex pump over one session: a reader task decrypts inbound frames
     /// into events while this task encrypts outbound messages from the peer's
     /// channel. The ratchet is shared behind a brief-hold mutex.
-    async fn run_session(self: Arc<Self>, peer: PublicIdentity, cs: ConnectedSession<IrohConn>) {
+    /// Returns the recovered [`SecureSession`] (if the ratchet survived the drop
+    /// intact) so the caller can resume it on the next connection.
+    async fn run_session(
+        &self,
+        peer: PublicIdentity,
+        cs: ConnectedSession<IrohConn>,
+    ) -> Option<SecureSession> {
         let key = peer.peer_id().0;
         let hex = hex::encode(key);
 
@@ -423,6 +504,8 @@ impl LatticeNode {
         let _ = self
             .events_tx
             .send(NodeEvent::PeerDisconnected { peer_id_hex: hex });
+        // Reclaim sole ownership of the ratchet so a reconnect can resume it.
+        Arc::try_unwrap(secure).ok().map(|m| m.into_inner())
     }
 
     fn emit_err(&self, message: String) {
@@ -481,5 +564,14 @@ mod tests {
         assert_eq!(summary.peer_id_hex, generated.peer_id_hex);
         assert_eq!(summary.fingerprint, generated.fingerprint);
         assert!(summarize_mnemonic("not a valid mnemonic phrase").is_err());
+    }
+
+    #[test]
+    fn decode_peer_key_accepts_32_bytes_rejects_junk() {
+        let good = "ab".repeat(32); // 64 hex chars = 32 bytes
+        assert!(decode_peer_key(&good).is_ok());
+        assert!(decode_peer_key("zz").is_err()); // not hex
+        assert!(decode_peer_key("abcd").is_err()); // wrong length
+        assert!(decode_peer_key("").is_err());
     }
 }

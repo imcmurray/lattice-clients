@@ -662,15 +662,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 2:
         return LatticeEvent_PeerConnected(peerIdHex: dco_decode_String(raw[1]));
       case 3:
+        return LatticeEvent_Resumed(peerIdHex: dco_decode_String(raw[1]));
+      case 4:
+        return LatticeEvent_Reconnecting(peerIdHex: dco_decode_String(raw[1]));
+      case 5:
         return LatticeEvent_Message(
           peerIdHex: dco_decode_String(raw[1]),
           body: dco_decode_String(raw[2]),
         );
-      case 4:
+      case 6:
         return LatticeEvent_PeerDisconnected(
           peerIdHex: dco_decode_String(raw[1]),
         );
-      case 5:
+      case 7:
         return LatticeEvent_Error(message: dco_decode_String(raw[1]));
       default:
         throw Exception("unreachable");
@@ -805,12 +809,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return LatticeEvent_PeerConnected(peerIdHex: var_peerIdHex);
       case 3:
         var var_peerIdHex = sse_decode_String(deserializer);
-        var var_body = sse_decode_String(deserializer);
-        return LatticeEvent_Message(peerIdHex: var_peerIdHex, body: var_body);
+        return LatticeEvent_Resumed(peerIdHex: var_peerIdHex);
       case 4:
         var var_peerIdHex = sse_decode_String(deserializer);
-        return LatticeEvent_PeerDisconnected(peerIdHex: var_peerIdHex);
+        return LatticeEvent_Reconnecting(peerIdHex: var_peerIdHex);
       case 5:
+        var var_peerIdHex = sse_decode_String(deserializer);
+        var var_body = sse_decode_String(deserializer);
+        return LatticeEvent_Message(peerIdHex: var_peerIdHex, body: var_body);
+      case 6:
+        var var_peerIdHex = sse_decode_String(deserializer);
+        return LatticeEvent_PeerDisconnected(peerIdHex: var_peerIdHex);
+      case 7:
         var var_message = sse_decode_String(deserializer);
         return LatticeEvent_Error(message: var_message);
       default:
@@ -960,15 +970,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case LatticeEvent_PeerConnected(peerIdHex: final peerIdHex):
         sse_encode_i_32(2, serializer);
         sse_encode_String(peerIdHex, serializer);
-      case LatticeEvent_Message(peerIdHex: final peerIdHex, body: final body):
+      case LatticeEvent_Resumed(peerIdHex: final peerIdHex):
         sse_encode_i_32(3, serializer);
+        sse_encode_String(peerIdHex, serializer);
+      case LatticeEvent_Reconnecting(peerIdHex: final peerIdHex):
+        sse_encode_i_32(4, serializer);
+        sse_encode_String(peerIdHex, serializer);
+      case LatticeEvent_Message(peerIdHex: final peerIdHex, body: final body):
+        sse_encode_i_32(5, serializer);
         sse_encode_String(peerIdHex, serializer);
         sse_encode_String(body, serializer);
       case LatticeEvent_PeerDisconnected(peerIdHex: final peerIdHex):
-        sse_encode_i_32(4, serializer);
+        sse_encode_i_32(6, serializer);
         sse_encode_String(peerIdHex, serializer);
       case LatticeEvent_Error(message: final message):
-        sse_encode_i_32(5, serializer);
+        sse_encode_i_32(7, serializer);
         sse_encode_String(message, serializer);
     }
   }

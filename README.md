@@ -45,9 +45,13 @@ A polished developer/operator harness that exercises every seam of the framework
   (`local_auth`), with graceful fallback where biometrics aren't available.
 - **Onboarding** — generate (reveal + confirm) or recover from a phrase.
 - **Instrument-panel dashboard** — fingerprint + copyable PeerId, an ONLINE power
-  toggle (binds iroh + accepts), a copyable connect ticket, paste-to-connect, a
-  live event console, and a per-peer encrypted send bar. Dark, mono crypto
-  readouts, with a live lattice-mesh that pulses teal when the node is online.
+  toggle (binds iroh + accepts), a connect ticket you can copy or share, live
+  event console, and a per-peer encrypted send bar. Dark, mono crypto readouts,
+  with a live lattice-mesh that pulses teal when the node is online.
+- **Session resume + auto-reconnect** — a dropped link is re-dialed with the
+  ratchet preserved (Lattice's `ConnectedSession::resume`); it falls back to a
+  fresh handshake if the peer can't resume, with exponential backoff while
+  unreachable. Resume/reconnect events show in the console.
 
 ## Requirements
 
@@ -83,6 +87,10 @@ See [`docs/m2-testing.md`](docs/m2-testing.md) for the two-node test procedure.
   QR/scan. (Multi-frame QR or a serverless short-code rendezvous is a future option.)
 - Building for Android with Gradle 9 required patching the vendored cargokit to use
   the injected `ExecOperations` service (Gradle 9 removed `Project.exec()`).
+- A per-peer **relay-vs-direct** path indicator is intentionally **not** shown: iroh
+  1.0.1's multipath rework removed the public connection-type signal, and a possibly
+  wrong "direct/secure" badge in a security tool is worse than none. Deferred until
+  the path is reliably queryable (RTT/link-health is a candidate substitute).
 
 ## Acknowledgements
 
