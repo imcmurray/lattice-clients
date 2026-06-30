@@ -259,10 +259,13 @@ impl LatticeNode {
         Ok(t)
     }
 
-    /// The dial ticket for this node (binds the transport if needed).
+    /// The dial ticket for this node (binds the transport if needed). Compact:
+    /// it carries only the iroh address + this node's 32-byte PeerId, not the
+    /// full PQ public-key bundle — small enough for a QR. The dialer fetches the
+    /// keys over the wire and verifies they hash to this PeerId.
     pub async fn my_ticket(&self) -> Result<String> {
         let t = self.ensure_online().await?;
-        t.ticket(&self.me.public().to_bytes()).await
+        t.ticket(&self.me.peer_id().0).await
     }
 
     /// Go online and start accepting inbound connections. Emits `Listening`
@@ -274,7 +277,7 @@ impl LatticeNode {
                 Ok(t) => t,
                 Err(e) => return node.emit_err(format!("go online: {e}")),
             };
-            match t.ticket(&node.me.public().to_bytes()).await {
+            match t.ticket(&node.me.peer_id().0).await {
                 Ok(ticket) => {
                     let _ = node.events_tx.send(NodeEvent::Listening { ticket });
                 }
@@ -352,6 +355,11 @@ impl LatticeNode {
     /// available, else run a fresh handshake. Keeps the recovered session for a
     /// future resume.
     async fn handle_incoming(self: Arc<Self>, mut conn: IrohConn) {
+        // Compact-ticket protocol: send our full identity first so the dialer
+        // can verify it against the PeerId in the ticket and use it for the KEM.
+        if conn.send(&self.me.public().to_bytes()).await.is_err() {
+            return;
+        }
         let preamble = match conn.recv().await {
             Ok(p) => p,
             Err(e) => return self.emit_err(format!("preamble: {e}")),
@@ -422,8 +430,17 @@ impl LatticeNode {
     /// ratchet into `kept` for the next attempt. Returns the peer's hex id.
     async fn dial_once(&self, ticket: &str, kept: &mut Option<SecureSession>) -> Result<String> {
         let t = self.ensure_online().await?;
-        let (peer_bytes, mut conn) = t.connect_ticket(ticket).await?;
-        let peer = PublicIdentity::from_bytes(&peer_bytes)?;
+        // The ticket carries the peer's 32-byte PeerId (the trust anchor).
+        let (expected_peer_id, mut conn) = t.connect_ticket(ticket).await?;
+        // The peer sends its full identity first; verify it hashes to the PeerId
+        // from the ticket before trusting it (TOFU on the fingerprint).
+        let identity_bytes = conn.recv().await?;
+        let peer = PublicIdentity::from_bytes(&identity_bytes)?;
+        if peer.peer_id().0.as_slice() != expected_peer_id.as_slice() {
+            return Err(Error::Verify(
+                "peer identity does not match the ticket fingerprint".into(),
+            ));
+        }
         let hex = hex::encode(peer.peer_id().0);
 
         let mode = if kept.is_some() { MODE_RESUME } else { MODE_FRESH };

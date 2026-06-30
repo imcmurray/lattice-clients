@@ -45,7 +45,7 @@ A polished developer/operator harness that exercises every seam of the framework
   (`local_auth`), with graceful fallback where biometrics aren't available.
 - **Onboarding** — generate (reveal + confirm) or recover from a phrase.
 - **Instrument-panel dashboard** — fingerprint + copyable PeerId, an ONLINE power
-  toggle (binds iroh + accepts), a connect ticket you can copy or share, live
+  toggle (binds iroh + accepts), a connect ticket as QR / scan / share / copy, live
   event console, and a per-peer encrypted send bar. Dark, mono crypto readouts,
   with a live lattice-mesh that pulses teal when the node is online.
 - **Session resume + auto-reconnect** — a dropped link is re-dialed with the
@@ -85,9 +85,12 @@ See [`docs/m2-testing.md`](docs/m2-testing.md) for the two-node test procedure.
 
 ## Notes
 
-- A Lattice **connect ticket carries the node's post-quantum public keys (~26 KB)** —
-  far beyond a QR code's ~3 KB ceiling — so ticket exchange is copy/paste text, not
-  QR/scan. (Multi-frame QR or a serverless short-code rendezvous is a future option.)
+- **Compact ticket:** rather than embed the full PQ public-key bundle (~26 KB, far
+  past a QR's ceiling), the ticket carries only the iroh address + the 32-byte
+  PeerId. Since `PeerId = BLAKE3(all public keys)`, the dialer fetches the keys
+  over the wire and verifies they hash to that PeerId — same security, but small
+  enough for a **single QR + camera scan**. (Wire protocol differs from the
+  `lattice-net` CLI as a result.)
 - Building for Android with Gradle 9 required patching the vendored cargokit to use
   the injected `ExecOperations` service (Gradle 9 removed `Project.exec()`).
 - The **direct-vs-relay** chip reads iroh 1.0.1's *selected* path (`is_ip` vs

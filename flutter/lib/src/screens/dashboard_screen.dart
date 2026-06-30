@@ -1,15 +1,23 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../state/dashboard_controller.dart';
 import '../theme.dart';
 import '../widgets/lattice_mesh.dart';
 import '../widgets/ui.dart';
+import 'scan_screen.dart';
 
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key, required this.identity});
+
+  bool get _scanSupported =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
   final dynamic identity; // IdentitySummary
 
   @override
@@ -39,7 +47,17 @@ class DashboardScreen extends ConsumerWidget {
                       onShowTicket: () => _showTicket(context, ctrl, state.ticket),
                     ),
                     const SizedBox(height: 12),
-                    _ConnectBar(onConnect: ctrl.connect),
+                    _ConnectBar(
+                      onConnect: ctrl.connect,
+                      onScan: _scanSupported
+                          ? () async {
+                              final t = await Navigator.of(context).push<String>(
+                                MaterialPageRoute(builder: (_) => const ScanScreen()),
+                              );
+                              if (t != null) ctrl.connect(t);
+                            }
+                          : null,
+                    ),
                     if (state.peers.isNotEmpty) ...[
                       const SizedBox(height: 12),
                       _LinksBar(peers: state.peers, links: state.links),
@@ -130,8 +148,9 @@ class _IdentityHeader extends StatelessWidget {
 }
 
 class _ConnectBar extends StatefulWidget {
-  const _ConnectBar({required this.onConnect});
+  const _ConnectBar({required this.onConnect, this.onScan});
   final void Function(String ticket) onConnect;
+  final VoidCallback? onScan;
   @override
   State<_ConnectBar> createState() => _ConnectBarState();
 }
@@ -178,6 +197,12 @@ class _ConnectBarState extends State<_ConnectBar> {
             onPressed: _paste,
             icon: const Icon(Icons.content_paste_rounded, color: Lx.muted, size: 18),
           ),
+          if (widget.onScan != null)
+            IconButton(
+              tooltip: 'Scan QR',
+              onPressed: widget.onScan,
+              icon: const Icon(Icons.qr_code_scanner_rounded, color: Lx.teal, size: 20),
+            ),
           FilledButton(onPressed: _submit, child: const Text('Connect')),
         ],
       ),
@@ -388,15 +413,30 @@ class _TicketDialog extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const SectionLabel('Connect ticket', color: Lx.teal),
-              const SizedBox(height: 10),
-              Text(
-                'Send this to the other device and paste it into Connect. It carries '
-                'this node’s post-quantum public keys, so it’s large — copy it as text.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Lx.muted, height: 1.4),
+              const SizedBox(height: 14),
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: QrImageView(
+                    data: ticket,
+                    version: QrVersions.auto,
+                    size: 220,
+                    backgroundColor: Colors.white,
+                  ),
+                ),
               ),
               const SizedBox(height: 14),
+              Text(
+                'Scan this from the other device — or share / copy the text below.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Lx.muted, height: 1.4),
+              ),
+              const SizedBox(height: 12),
               Container(
-                constraints: const BoxConstraints(maxHeight: 200),
+                constraints: const BoxConstraints(maxHeight: 120),
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: Lx.surface,
