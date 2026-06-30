@@ -355,11 +355,8 @@ impl LatticeNode {
     /// available, else run a fresh handshake. Keeps the recovered session for a
     /// future resume.
     async fn handle_incoming(self: Arc<Self>, mut conn: IrohConn) {
-        // Compact-ticket protocol: send our full identity first so the dialer
-        // can verify it against the PeerId in the ticket and use it for the KEM.
-        if conn.send(&self.me.public().to_bytes()).await.is_err() {
-            return;
-        }
+        // The dialer sends its preamble first — that's what completes accept_bi
+        // on our side (a QUIC bi-stream is only observed once the client sends).
         let preamble = match conn.recv().await {
             Ok(p) => p,
             Err(e) => return self.emit_err(format!("preamble: {e}")),
@@ -382,16 +379,23 @@ impl LatticeNode {
             None
         };
 
+        // Reply with [decision] ++ our full identity, so the dialer can verify
+        // it hashes to the PeerId in the ticket and use it for the KEM.
+        let decision = if resumable.is_some() {
+            DECISION_RESUMED
+        } else {
+            DECISION_FRESH
+        };
+        let mut reply = vec![decision];
+        reply.extend_from_slice(&self.me.public().to_bytes());
+        if conn.send(&reply).await.is_err() {
+            return;
+        }
+
         let cs = if let Some(sess) = resumable {
-            if conn.send(&[DECISION_RESUMED]).await.is_err() {
-                return;
-            }
             let _ = self.events_tx.send(NodeEvent::Resumed { peer_id_hex: hex });
             ConnectedSession::resume(conn, sess)
         } else {
-            if conn.send(&[DECISION_FRESH]).await.is_err() {
-                return;
-            }
             match ConnectedSession::accept(conn, self.me.as_ref(), &peer).await {
                 Ok(cs) => cs,
                 Err(e) => return self.emit_err(format!("handshake: {e}")),
@@ -432,23 +436,28 @@ impl LatticeNode {
         let t = self.ensure_online().await?;
         // The ticket carries the peer's 32-byte PeerId (the trust anchor).
         let (expected_peer_id, mut conn) = t.connect_ticket(ticket).await?;
-        // The peer sends its full identity first; verify it hashes to the PeerId
-        // from the ticket before trusting it (TOFU on the fingerprint).
-        let identity_bytes = conn.recv().await?;
-        let peer = PublicIdentity::from_bytes(&identity_bytes)?;
+
+        // Send our preamble FIRST to open the QUIC bi-stream — the listener's
+        // accept only completes once the client sends.
+        let mode = if kept.is_some() { MODE_RESUME } else { MODE_FRESH };
+        let mut preamble = vec![mode];
+        preamble.extend_from_slice(&self.me.public().to_bytes());
+        conn.send(&preamble).await?;
+
+        // The listener replies with [decision] ++ its full identity; verify it
+        // hashes to the PeerId from the ticket before trusting it (TOFU).
+        let reply = conn.recv().await?;
+        if reply.is_empty() {
+            return Err(Error::Verify("empty reply from peer".into()));
+        }
+        let resumed = reply[0] == DECISION_RESUMED;
+        let peer = PublicIdentity::from_bytes(&reply[1..])?;
         if peer.peer_id().0.as_slice() != expected_peer_id.as_slice() {
             return Err(Error::Verify(
                 "peer identity does not match the ticket fingerprint".into(),
             ));
         }
         let hex = hex::encode(peer.peer_id().0);
-
-        let mode = if kept.is_some() { MODE_RESUME } else { MODE_FRESH };
-        let mut preamble = vec![mode];
-        preamble.extend_from_slice(&self.me.public().to_bytes());
-        conn.send(&preamble).await?;
-        let decision = conn.recv().await?;
-        let resumed = decision.first() == Some(&DECISION_RESUMED);
 
         let cs = if resumed {
             let sess = kept

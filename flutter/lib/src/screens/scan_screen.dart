@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:qr_code_dart_scan/qr_code_dart_scan.dart';
 
 import '../theme.dart';
 import '../widgets/ui.dart';
 
 /// Camera QR scanner (mobile only). Pops with the first decoded ticket string.
+///
+/// Built on Flutter's official `camera` plugin + a pure-Dart zxing decoder
+/// (qr_code_dart_scan) — no ML Kit / CameraX, which is what made mobile_scanner
+/// crash on this Flutter/engine version.
 class ScanScreen extends StatefulWidget {
   const ScanScreen({super.key});
   @override
@@ -14,12 +18,10 @@ class ScanScreen extends StatefulWidget {
 class _ScanScreenState extends State<ScanScreen> {
   bool _handled = false;
 
-  void _onDetect(BarcodeCapture capture) {
+  void _onCapture(Result result) {
     if (_handled) return;
-    final codes = capture.barcodes;
-    if (codes.isEmpty) return;
-    final value = codes.first.rawValue;
-    if (value == null || value.isEmpty) return;
+    final value = result.text;
+    if (value.isEmpty) return;
     _handled = true;
     Navigator.of(context).pop(value);
   }
@@ -34,7 +36,11 @@ class _ScanScreenState extends State<ScanScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          MobileScanner(onDetect: _onDetect),
+          QRCodeDartScanView(
+            typeScan: TypeScan.live,
+            formats: const [BarcodeFormat.qrCode],
+            onCapture: _onCapture,
+          ),
           Align(
             alignment: Alignment.bottomCenter,
             child: Padding(
