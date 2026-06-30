@@ -22,29 +22,40 @@ class LogLine {
       };
 }
 
+/// Live link health for one peer: direct-vs-relay path and RTT (ms).
+class PeerLink {
+  const PeerLink({required this.direct, this.rttMs});
+  final bool direct;
+  final int? rttMs;
+}
+
 class DashboardState {
   const DashboardState({
     this.listening = false,
     this.ticket,
     this.peers = const <String>{},
+    this.links = const <String, PeerLink>{},
     this.log = const <LogLine>[],
   });
 
   final bool listening;
   final String? ticket;
   final Set<String> peers;
+  final Map<String, PeerLink> links;
   final List<LogLine> log;
 
   DashboardState copyWith({
     bool? listening,
     String? ticket,
     Set<String>? peers,
+    Map<String, PeerLink>? links,
     List<LogLine>? log,
   }) =>
       DashboardState(
         listening: listening ?? this.listening,
         ticket: ticket ?? this.ticket,
         peers: peers ?? this.peers,
+        links: links ?? this.links,
         log: log ?? this.log,
       );
 }
@@ -87,8 +98,16 @@ class DashboardController extends Notifier<DashboardState> {
         _log(LogKind.signal, 'Resumed without re-handshake · ${_short(peerIdHex)}');
       case LatticeEvent_Reconnecting(:final peerIdHex):
         _log(LogKind.info, 'Reconnecting to ${_short(peerIdHex)}…');
+      case LatticeEvent_Link(:final peerIdHex, :final direct, :final rttMs):
+        state = state.copyWith(links: {
+          ...state.links,
+          peerIdHex: PeerLink(direct: direct, rttMs: rttMs),
+        });
       case LatticeEvent_PeerDisconnected(:final peerIdHex):
-        state = state.copyWith(peers: {...state.peers}..remove(peerIdHex));
+        state = state.copyWith(
+          peers: {...state.peers}..remove(peerIdHex),
+          links: {...state.links}..remove(peerIdHex),
+        );
         _log(LogKind.peer, 'Session closed · ${_short(peerIdHex)}');
       case LatticeEvent_Message(:final peerIdHex, :final body):
         _log(LogKind.message, '${_short(peerIdHex)} » $body');

@@ -819,19 +819,29 @@ impl SseDecode for crate::api::node::LatticeEvent {
             }
             5 => {
                 let mut var_peerIdHex = <String>::sse_decode(deserializer);
+                let mut var_direct = <bool>::sse_decode(deserializer);
+                let mut var_rttMs = <Option<u32>>::sse_decode(deserializer);
+                return crate::api::node::LatticeEvent::Link {
+                    peer_id_hex: var_peerIdHex,
+                    direct: var_direct,
+                    rtt_ms: var_rttMs,
+                };
+            }
+            6 => {
+                let mut var_peerIdHex = <String>::sse_decode(deserializer);
                 let mut var_body = <String>::sse_decode(deserializer);
                 return crate::api::node::LatticeEvent::Message {
                     peer_id_hex: var_peerIdHex,
                     body: var_body,
                 };
             }
-            6 => {
+            7 => {
                 let mut var_peerIdHex = <String>::sse_decode(deserializer);
                 return crate::api::node::LatticeEvent::PeerDisconnected {
                     peer_id_hex: var_peerIdHex,
                 };
             }
-            7 => {
+            8 => {
                 let mut var_message = <String>::sse_decode(deserializer);
                 return crate::api::node::LatticeEvent::Error {
                     message: var_message,
@@ -867,6 +877,24 @@ impl SseDecode for crate::api::node::NewIdentity {
             peer_id_hex: var_peerIdHex,
             fingerprint: var_fingerprint,
         };
+    }
+}
+
+impl SseDecode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<u32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for u32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u32::<NativeEndian>().unwrap()
     }
 }
 
@@ -991,17 +1019,28 @@ impl flutter_rust_bridge::IntoDart for crate::api::node::LatticeEvent {
             crate::api::node::LatticeEvent::Reconnecting { peer_id_hex } => {
                 [4.into_dart(), peer_id_hex.into_into_dart().into_dart()].into_dart()
             }
-            crate::api::node::LatticeEvent::Message { peer_id_hex, body } => [
+            crate::api::node::LatticeEvent::Link {
+                peer_id_hex,
+                direct,
+                rtt_ms,
+            } => [
                 5.into_dart(),
+                peer_id_hex.into_into_dart().into_dart(),
+                direct.into_into_dart().into_dart(),
+                rtt_ms.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::node::LatticeEvent::Message { peer_id_hex, body } => [
+                6.into_dart(),
                 peer_id_hex.into_into_dart().into_dart(),
                 body.into_into_dart().into_dart(),
             ]
             .into_dart(),
             crate::api::node::LatticeEvent::PeerDisconnected { peer_id_hex } => {
-                [6.into_dart(), peer_id_hex.into_into_dart().into_dart()].into_dart()
+                [7.into_dart(), peer_id_hex.into_into_dart().into_dart()].into_dart()
             }
             crate::api::node::LatticeEvent::Error { message } => {
-                [7.into_dart(), message.into_into_dart().into_dart()].into_dart()
+                [8.into_dart(), message.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -1120,17 +1159,27 @@ impl SseEncode for crate::api::node::LatticeEvent {
                 <i32>::sse_encode(4, serializer);
                 <String>::sse_encode(peer_id_hex, serializer);
             }
-            crate::api::node::LatticeEvent::Message { peer_id_hex, body } => {
+            crate::api::node::LatticeEvent::Link {
+                peer_id_hex,
+                direct,
+                rtt_ms,
+            } => {
                 <i32>::sse_encode(5, serializer);
+                <String>::sse_encode(peer_id_hex, serializer);
+                <bool>::sse_encode(direct, serializer);
+                <Option<u32>>::sse_encode(rtt_ms, serializer);
+            }
+            crate::api::node::LatticeEvent::Message { peer_id_hex, body } => {
+                <i32>::sse_encode(6, serializer);
                 <String>::sse_encode(peer_id_hex, serializer);
                 <String>::sse_encode(body, serializer);
             }
             crate::api::node::LatticeEvent::PeerDisconnected { peer_id_hex } => {
-                <i32>::sse_encode(6, serializer);
+                <i32>::sse_encode(7, serializer);
                 <String>::sse_encode(peer_id_hex, serializer);
             }
             crate::api::node::LatticeEvent::Error { message } => {
-                <i32>::sse_encode(7, serializer);
+                <i32>::sse_encode(8, serializer);
                 <String>::sse_encode(message, serializer);
             }
             _ => {
@@ -1156,6 +1205,23 @@ impl SseEncode for crate::api::node::NewIdentity {
         <String>::sse_encode(self.mnemonic, serializer);
         <String>::sse_encode(self.peer_id_hex, serializer);
         <String>::sse_encode(self.fingerprint, serializer);
+    }
+}
+
+impl SseEncode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <u32>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for u32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_u32::<NativeEndian>(self).unwrap();
     }
 }
 

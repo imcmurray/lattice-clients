@@ -52,6 +52,9 @@ A polished developer/operator harness that exercises every seam of the framework
   ratchet preserved (Lattice's `ConnectedSession::resume`); it falls back to a
   fresh handshake if the peer can't resume, with exponential backoff while
   unreachable. Resume/reconnect events show in the console.
+- **Per-peer link health** — each connected peer shows a live chip: direct
+  (teal) vs relayed (amber), plus round-trip time, polled from the selected
+  iroh path.
 
 ## Requirements
 
@@ -87,10 +90,9 @@ See [`docs/m2-testing.md`](docs/m2-testing.md) for the two-node test procedure.
   QR/scan. (Multi-frame QR or a serverless short-code rendezvous is a future option.)
 - Building for Android with Gradle 9 required patching the vendored cargokit to use
   the injected `ExecOperations` service (Gradle 9 removed `Project.exec()`).
-- A per-peer **relay-vs-direct** path indicator is intentionally **not** shown: iroh
-  1.0.1's multipath rework removed the public connection-type signal, and a possibly
-  wrong "direct/secure" badge in a security tool is worse than none. Deferred until
-  the path is reliably queryable (RTT/link-health is a candidate substitute).
+- The **direct-vs-relay** chip reads iroh 1.0.1's *selected* path (`is_ip` vs
+  `is_relay`) rather than a removed top-level "connection type" — it reflects the
+  actual data path and updates when a relay link upgrades to a direct one.
 
 ## Acknowledgements
 

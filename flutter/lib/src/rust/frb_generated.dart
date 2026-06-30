@@ -640,6 +640,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
   IdentitySummary dco_decode_identity_summary(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -666,15 +672,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 4:
         return LatticeEvent_Reconnecting(peerIdHex: dco_decode_String(raw[1]));
       case 5:
+        return LatticeEvent_Link(
+          peerIdHex: dco_decode_String(raw[1]),
+          direct: dco_decode_bool(raw[2]),
+          rttMs: dco_decode_opt_box_autoadd_u_32(raw[3]),
+        );
+      case 6:
         return LatticeEvent_Message(
           peerIdHex: dco_decode_String(raw[1]),
           body: dco_decode_String(raw[2]),
         );
-      case 6:
+      case 7:
         return LatticeEvent_PeerDisconnected(
           peerIdHex: dco_decode_String(raw[1]),
         );
-      case 7:
+      case 8:
         return LatticeEvent_Error(message: dco_decode_String(raw[1]));
       default:
         throw Exception("unreachable");
@@ -698,6 +710,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       peerIdHex: dco_decode_String(arr[1]),
       fingerprint: dco_decode_String(arr[2]),
     );
+  }
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
+  }
+
+  @protected
+  int dco_decode_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -783,6 +807,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_u_32(deserializer));
+  }
+
+  @protected
   IdentitySummary sse_decode_identity_summary(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_peerIdHex = sse_decode_String(deserializer);
@@ -815,12 +845,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return LatticeEvent_Reconnecting(peerIdHex: var_peerIdHex);
       case 5:
         var var_peerIdHex = sse_decode_String(deserializer);
-        var var_body = sse_decode_String(deserializer);
-        return LatticeEvent_Message(peerIdHex: var_peerIdHex, body: var_body);
+        var var_direct = sse_decode_bool(deserializer);
+        var var_rttMs = sse_decode_opt_box_autoadd_u_32(deserializer);
+        return LatticeEvent_Link(
+          peerIdHex: var_peerIdHex,
+          direct: var_direct,
+          rttMs: var_rttMs,
+        );
       case 6:
         var var_peerIdHex = sse_decode_String(deserializer);
-        return LatticeEvent_PeerDisconnected(peerIdHex: var_peerIdHex);
+        var var_body = sse_decode_String(deserializer);
+        return LatticeEvent_Message(peerIdHex: var_peerIdHex, body: var_body);
       case 7:
+        var var_peerIdHex = sse_decode_String(deserializer);
+        return LatticeEvent_PeerDisconnected(peerIdHex: var_peerIdHex);
+      case 8:
         var var_message = sse_decode_String(deserializer);
         return LatticeEvent_Error(message: var_message);
       default:
@@ -846,6 +885,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       peerIdHex: var_peerIdHex,
       fingerprint: var_fingerprint,
     );
+  }
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_u_32(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint32();
   }
 
   @protected
@@ -949,6 +1005,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self, serializer);
+  }
+
+  @protected
   void sse_encode_identity_summary(
     IdentitySummary self,
     SseSerializer serializer,
@@ -976,15 +1038,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case LatticeEvent_Reconnecting(peerIdHex: final peerIdHex):
         sse_encode_i_32(4, serializer);
         sse_encode_String(peerIdHex, serializer);
-      case LatticeEvent_Message(peerIdHex: final peerIdHex, body: final body):
+      case LatticeEvent_Link(
+        peerIdHex: final peerIdHex,
+        direct: final direct,
+        rttMs: final rttMs,
+      ):
         sse_encode_i_32(5, serializer);
+        sse_encode_String(peerIdHex, serializer);
+        sse_encode_bool(direct, serializer);
+        sse_encode_opt_box_autoadd_u_32(rttMs, serializer);
+      case LatticeEvent_Message(peerIdHex: final peerIdHex, body: final body):
+        sse_encode_i_32(6, serializer);
         sse_encode_String(peerIdHex, serializer);
         sse_encode_String(body, serializer);
       case LatticeEvent_PeerDisconnected(peerIdHex: final peerIdHex):
-        sse_encode_i_32(6, serializer);
+        sse_encode_i_32(7, serializer);
         sse_encode_String(peerIdHex, serializer);
       case LatticeEvent_Error(message: final message):
-        sse_encode_i_32(7, serializer);
+        sse_encode_i_32(8, serializer);
         sse_encode_String(message, serializer);
     }
   }
@@ -1005,6 +1076,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.mnemonic, serializer);
     sse_encode_String(self.peerIdHex, serializer);
     sse_encode_String(self.fingerprint, serializer);
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_u_32(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint32(self);
   }
 
   @protected

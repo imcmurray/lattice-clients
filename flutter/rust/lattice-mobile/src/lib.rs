@@ -173,6 +173,13 @@ pub enum NodeEvent {
     Resumed { peer_id_hex: String },
     /// The dialer lost a peer and is retrying (with resume on success).
     Reconnecting { peer_id_hex: String },
+    /// Live link health for a peer: whether the selected path is direct (vs
+    /// relayed) and its round-trip time in ms (once measured).
+    Link {
+        peer_id_hex: String,
+        direct: bool,
+        rtt_ms: Option<u32>,
+    },
     /// A decrypted application message arrived.
     Message { peer_id_hex: String, body: String },
     /// A peer's session ended (transport drop or local teardown).
@@ -189,6 +196,8 @@ pub struct LatticeNode {
     transport: Arc<Mutex<Option<Arc<IrohTransport>>>>,
     peers: Arc<Mutex<HashMap<PeerKey, mpsc::UnboundedSender<Vec<u8>>>>>,
     listen_task: Arc<Mutex<Option<AbortHandle>>>,
+    /// The single active outbound dial loop (replaced on each `connect`).
+    dial_task: Arc<Mutex<Option<AbortHandle>>>,
     /// Ratchet sessions kept across drops so a reconnecting peer can resume
     /// without a fresh handshake (the listener side of resumption).
     kept: Arc<Mutex<HashMap<PeerKey, SecureSession>>>,
@@ -208,6 +217,7 @@ impl LatticeNode {
             transport: Arc::new(Mutex::new(None)),
             peers: Arc::new(Mutex::new(HashMap::new())),
             listen_task: Arc::new(Mutex::new(None)),
+            dial_task: Arc::new(Mutex::new(None)),
             kept: Arc::new(Mutex::new(HashMap::new())),
             events_tx,
             events_rx: Mutex::new(Some(events_rx)),
@@ -312,7 +322,16 @@ impl LatticeNode {
     /// the peer can't resume), with exponential backoff while unreachable.
     pub fn connect(self: &Arc<Self>, ticket: String) {
         let node = Arc::clone(self);
-        runtime().spawn(async move { node.dial_loop(ticket).await });
+        runtime().spawn(async move {
+            // Replace any existing dial loop so repeated taps don't stack
+            // reconnect loops (which would race + spam transport timeouts).
+            if let Some(h) = node.dial_task.lock().await.take() {
+                h.abort();
+            }
+            let runner = Arc::clone(&node);
+            let handle = runtime().spawn(async move { runner.dial_loop(ticket).await });
+            *node.dial_task.lock().await = Some(handle.abort_handle());
+        });
     }
 
     /// Send a UTF-8 message to a connected peer (by hex PeerId).
@@ -451,8 +470,26 @@ impl LatticeNode {
             .send(NodeEvent::PeerConnected { peer_id_hex: hex.clone() });
 
         let (conn, secure) = cs.into_parts();
+        let link_handle = conn.handle();
         let (mut send, mut recv) = conn.into_split();
         let secure = Arc::new(Mutex::new(secure));
+
+        // Poll link health (direct-vs-relay + RTT) into the event stream.
+        let poller = {
+            let events_tx = self.events_tx.clone();
+            let hex = hex.clone();
+            runtime().spawn(async move {
+                loop {
+                    let info = link_handle.link();
+                    let _ = events_tx.send(NodeEvent::Link {
+                        peer_id_hex: hex.clone(),
+                        direct: info.direct,
+                        rtt_ms: info.rtt_ms.map(|v| v as u32),
+                    });
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            })
+        };
 
         let lost = Arc::new(Notify::new());
         let reader = {
@@ -499,7 +536,9 @@ impl LatticeNode {
         }
 
         reader.abort();
+        poller.abort();
         let _ = reader.await;
+        let _ = poller.await;
         self.peers.lock().await.remove(&key);
         let _ = self
             .events_tx

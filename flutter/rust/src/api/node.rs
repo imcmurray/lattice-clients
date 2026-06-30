@@ -209,6 +209,11 @@ pub enum LatticeEvent {
     PeerConnected { peer_id_hex: String },
     Resumed { peer_id_hex: String },
     Reconnecting { peer_id_hex: String },
+    Link {
+        peer_id_hex: String,
+        direct: bool,
+        rtt_ms: Option<u32>,
+    },
     Message { peer_id_hex: String, body: String },
     PeerDisconnected { peer_id_hex: String },
     Error { message: String },
@@ -222,6 +227,15 @@ impl From<NodeEvent> for LatticeEvent {
             NodeEvent::PeerConnected { peer_id_hex } => LatticeEvent::PeerConnected { peer_id_hex },
             NodeEvent::Resumed { peer_id_hex } => LatticeEvent::Resumed { peer_id_hex },
             NodeEvent::Reconnecting { peer_id_hex } => LatticeEvent::Reconnecting { peer_id_hex },
+            NodeEvent::Link {
+                peer_id_hex,
+                direct,
+                rtt_ms,
+            } => LatticeEvent::Link {
+                peer_id_hex,
+                direct,
+                rtt_ms,
+            },
             NodeEvent::Message { peer_id_hex, body } => LatticeEvent::Message { peer_id_hex, body },
             NodeEvent::PeerDisconnected { peer_id_hex } => {
                 LatticeEvent::PeerDisconnected { peer_id_hex }

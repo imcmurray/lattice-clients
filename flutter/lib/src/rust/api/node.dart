@@ -105,6 +105,11 @@ sealed class LatticeEvent with _$LatticeEvent {
       LatticeEvent_Resumed;
   const factory LatticeEvent.reconnecting({required String peerIdHex}) =
       LatticeEvent_Reconnecting;
+  const factory LatticeEvent.link({
+    required String peerIdHex,
+    required bool direct,
+    int? rttMs,
+  }) = LatticeEvent_Link;
   const factory LatticeEvent.message({
     required String peerIdHex,
     required String body,

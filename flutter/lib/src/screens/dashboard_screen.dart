@@ -40,6 +40,10 @@ class DashboardScreen extends ConsumerWidget {
                     ),
                     const SizedBox(height: 12),
                     _ConnectBar(onConnect: ctrl.connect),
+                    if (state.peers.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      _LinksBar(peers: state.peers, links: state.links),
+                    ],
                     const SizedBox(height: 12),
                     Expanded(child: _Console(log: state.log, onClear: ctrl.clearLog)),
                     if (state.peers.isNotEmpty) ...[
@@ -175,6 +179,58 @@ class _ConnectBarState extends State<_ConnectBar> {
             icon: const Icon(Icons.content_paste_rounded, color: Lx.muted, size: 18),
           ),
           FilledButton(onPressed: _submit, child: const Text('Connect')),
+        ],
+      ),
+    );
+  }
+}
+
+/// Per-peer link health: a chip per connected peer showing direct-vs-relay
+/// (teal vs amber) and the live RTT.
+class _LinksBar extends StatelessWidget {
+  const _LinksBar({required this.peers, required this.links});
+  final Set<String> peers;
+  final Map<String, PeerLink> links;
+
+  @override
+  Widget build(BuildContext context) {
+    return Panel(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [for (final p in peers) _chip(p, links[p])],
+      ),
+    );
+  }
+
+  Widget _chip(String peer, PeerLink? link) {
+    final direct = link?.direct ?? false;
+    final color = link == null ? Lx.muted : (direct ? Lx.teal : Lx.amber);
+    final kind = link == null ? 'connecting' : (direct ? 'direct' : 'relay');
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      decoration: BoxDecoration(
+        color: Lx.raisedHi,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Lx.line),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 8),
+          Text('${peer.substring(0, 8)}…', style: mono(size: 11, color: Lx.text)),
+          const SizedBox(width: 8),
+          Text(kind, style: mono(size: 11, color: color)),
+          if (link?.rttMs != null) ...[
+            const SizedBox(width: 6),
+            Text('· ${link!.rttMs}ms', style: mono(size: 11, color: Lx.muted)),
+          ],
         ],
       ),
     );
