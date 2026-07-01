@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Keep pinned GitHub Actions SHAs current (Dependabot updates the pin + comment).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  # Dart / Flutter package dependencies.
+  - package-ecosystem: pub
+    directory: /flutter
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+
+  # Rust crates for the FFI facade (and, transitively, Lattice's own deps live in
+  # the Lattice repo's dependabot config).
+  - package-ecosystem: cargo
+    directory: /flutter/rust
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps

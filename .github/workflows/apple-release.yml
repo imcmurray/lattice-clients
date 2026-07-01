@@ -1,0 +1,152 @@
+name: Apple release
+
+# Builds the macOS bundle and compile-checks iOS on macos-latest runners (Xcode +
+# CocoaPods only exist on macOS). Rust builds via the cargokit podspec in
+# rust_builder/{ios,macos}.
+#
+# macOS: produces a zipped .app artifact, attached to a Release on v* tags. It is
+#        unsigned (Gatekeeper needs right-click > Open, or notarization with an
+#        Apple Developer account).
+# iOS:   compile-check only (--no-codesign). A device-installable .ipa or a
+#        TestFlight upload needs the Apple Developer Program: signing certs, a
+#        provisioning profile, and an App Store Connect key. The signing path is
+#        stubbed at the bottom, commented out, for when that account exists.
+#
+# Actions are pinned to commit SHAs (not mutable tags) as a supply-chain measure.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'flutter/**'
+      - '.github/workflows/apple-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Lattice-Clients
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: Lattice-Clients
+
+      # Sibling path dependency, pinned to the commit the clients depend on.
+      - name: Checkout Lattice framework
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: imcmurray/lattice
+          path: Lattice
+          ref: 78f28fb
+
+      - name: Set up Rust (Apple desktop targets)
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
+
+      - name: flutter pub get
+        working-directory: Lattice-Clients/flutter
+        run: flutter pub get
+
+      - name: Build macOS (release)
+        working-directory: Lattice-Clients/flutter
+        run: flutter build macos --release
+
+      - name: Package .app
+        working-directory: Lattice-Clients/flutter
+        run: |
+          cd build/macos/Build/Products/Release
+          APP=$(ls -d *.app | head -n1)
+          ditto -c -k --keepParent "$APP" "$GITHUB_WORKSPACE/lattice-node-macos.zip"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lattice-node-macos
+          path: lattice-node-macos.zip
+          if-no-files-found: error
+
+  build-ios:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Lattice-Clients
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          path: Lattice-Clients
+
+      - name: Checkout Lattice framework
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: imcmurray/lattice
+          path: Lattice
+          ref: 78f28fb
+
+      - name: Set up Rust (iOS targets)
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: flutter pub get
+        working-directory: Lattice-Clients/flutter
+        run: flutter pub get
+
+      # Compile-check only: verifies the whole iOS toolchain (Rust -> static lib ->
+      # pod -> Xcode) but produces no installable artifact.
+      - name: Build iOS (no codesign)
+        working-directory: Lattice-Clients/flutter
+        run: flutter build ios --release --no-codesign
+
+      # --- Signed .ipa path (requires Apple Developer Program) -----------------
+      # When you have an account, gate this behind a GitHub Environment with a
+      # required reviewer and provide the secrets:
+      #
+      # - uses: apple-actions/import-codesign-certs@<sha>   # v3
+      #   with:
+      #     p12-file-base64: ${{ secrets.APPLE_CERT_P12 }}
+      #     p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
+      # - uses: apple-actions/download-provisioning-profiles@<sha>  # v3
+      #   with:
+      #     bundle-id: dev.lattice.node
+      #     issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
+      #     api-key-id: ${{ secrets.APPSTORE_KEY_ID }}
+      #     api-private-key: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+      # - name: Build signed .ipa
+      #   working-directory: Lattice-Clients/flutter
+      #   run: flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
+
+  release:
+    needs: [build-macos, build-ios]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: lattice-node-macos
+      - name: Attach to Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: lattice-node-macos.zip

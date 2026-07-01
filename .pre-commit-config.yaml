@@ -1,0 +1,10 @@
+# Local secret-scanning net. Install once with:
+#   pipx install pre-commit   (or: pip install --user pre-commit)
+#   pre-commit install
+# Then every `git commit` is scanned before the commit is created — a backstop
+# for the identity files / CLAUDE-FABLE-5.md that .gitignore already excludes.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
