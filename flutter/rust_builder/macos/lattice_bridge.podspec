@@ -39,6 +39,9 @@ A new Flutter FFI plugin project.
     'DEFINES_MODULE' => 'YES',
     # Flutter.framework does not contain a i386 slice.
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
-    'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/liblattice_bridge.a',
+    # The Rust static lib (iroh network stack) references Apple's
+    # SystemConfiguration framework; a staticlib can't propagate its own
+    # cargo:rustc-link-lib directives, so Xcode must link the framework here.
+    'OTHER_LDFLAGS' => '-force_load ${BUILT_PRODUCTS_DIR}/liblattice_bridge.a -framework SystemConfiguration',
   }
 end
