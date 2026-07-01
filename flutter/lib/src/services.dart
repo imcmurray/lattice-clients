@@ -97,7 +97,19 @@ class NotificationService {
   static Future<void> init() async {
     const android = AndroidInitializationSettings('@mipmap/ic_launcher');
     const linux = LinuxInitializationSettings(defaultActionName: 'Open');
-    const settings = InitializationSettings(android: android, linux: linux);
+    // Windows toasts via flutter_local_notifications_windows. The GUID is a
+    // stable per-app identifier (any fixed GUID works); appUserModelId ties the
+    // toasts to this app in Action Center.
+    const windows = WindowsInitializationSettings(
+      appName: 'Lattice Node',
+      appUserModelId: 'dev.lattice.node',
+      guid: '5f3c9a1e-8b2d-4e7a-9c1f-2a6b4d8e0c31',
+    );
+    const settings = InitializationSettings(
+      android: android,
+      linux: linux,
+      windows: windows,
+    );
     try {
       await _plugin.initialize(settings: settings);
       final androidImpl = _plugin.resolvePlatformSpecificImplementation<
@@ -127,6 +139,7 @@ class NotificationService {
         priority: Priority.high,
       ),
       linux: LinuxNotificationDetails(),
+      windows: WindowsNotificationDetails(),
     );
     _id = (_id + 1) % 100000;
     try {
