@@ -41,7 +41,7 @@ jobs:
         with:
           repository: imcmurray/lattice
           path: Lattice
-          ref: 78f28fb
+          ref: 78f28fb0e7455366218305d3e43ea0cda5e28941
 
       - name: Set up Rust (MSVC target)
         uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
