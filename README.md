@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="flutter/assets/icon/icon.png" width="128" alt="Lattice Node" />
+</p>
+
 # Lattice Clients
 
 Cross-platform client applications for the **[Lattice](https://github.com/imcmurray/lattice)

@@ -112,7 +112,7 @@ class _IdentityHeader extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.hub_outlined, color: Lx.violet, size: 20),
+              Image.asset('assets/icon/mark.png', width: 22, height: 22),
               const SizedBox(width: 8),
               Text('Lattice Node', style: Theme.of(context).textTheme.titleMedium),
               const Spacer(),

@@ -58,7 +58,7 @@ class Wordmark extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        const Icon(Icons.hub_outlined, size: 52, color: Lx.violet),
+        Image.asset('assets/icon/mark.png', width: 56, height: 56),
         const SizedBox(height: 14),
         Text('Lattice Node', style: Theme.of(context).textTheme.headlineMedium),
         const SizedBox(height: 6),
