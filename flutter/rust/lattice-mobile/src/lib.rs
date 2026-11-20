@@ -113,9 +113,19 @@ pub fn summarize_mnemonic(mnemonic: &str) -> Result<IdentitySummary> {
 /// Encrypt `mnemonic` under `passphrase` (age scrypt) to `<dir>/identity.age`,
 /// `0600`. Validates the mnemonic first so we never persist garbage. Returns
 /// the resulting identity summary.
+///
+/// Fails closed (mirrors Lattice's identity store): it never overwrites an
+/// existing identity, so a lost or failed keystore can't silently replace the
+/// root mnemonic. The file is written atomically (temp file, fsync, rename),
+/// so a crash can't leave a truncated identity behind.
 pub fn store_identity(dir: &str, mnemonic: &str, passphrase: &str) -> Result<IdentitySummary> {
     validate_passphrase(passphrase)?;
     let summary = summarize_mnemonic(mnemonic)?;
+    if identity_exists(dir) {
+        return Err(Error::Other(
+            "an identity already exists on this device; refusing to overwrite it".into(),
+        ));
+    }
     std::fs::create_dir_all(dir).map_err(|e| Error::Other(format!("create dir: {e}")))?;
     let recipient = age::scrypt::Recipient::new(secret(passphrase));
     let ct = age::encrypt(&recipient, mnemonic.as_bytes())
@@ -176,25 +186,36 @@ fn fingerprint(kp: &Keypair) -> String {
     format!("{}…{}", hex::encode(&id[..4]), hex::encode(&id[28..]))
 }
 
+/// Atomically create `path` (mode `0600` on unix) with `bytes`: write a sibling
+/// temp file, fsync it, then rename it into place. A crash leaves either no
+/// identity or the complete one, never a truncated file.
 fn write_file_0600(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("age.tmp");
+    let _ = std::fs::remove_file(&tmp); // stale temp from an earlier crash
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|e| Error::Other(format!("create identity file: {e}")))?;
-        f.write_all(bytes)
-            .map_err(|e| Error::Other(format!("write identity file: {e}")))
+        opts.mode(0o600);
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes).map_err(|e| Error::Other(format!("write identity file: {e}")))
+    let written = (|| {
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?; // persist the rename
+        }
+        Ok::<(), std::io::Error>(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Other(format!("write identity file: {e}")));
     }
+    Ok(())
 }
 
 // ===========================================================================
@@ -1294,6 +1315,43 @@ mod tests {
             assert!(err.to_string().contains("passphrase must not be empty"));
             assert!(!identity_exists(&dir));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn store_identity_refuses_to_overwrite() {
+        let dir = tmp_dir("no-overwrite");
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = generate_identity().unwrap();
+        store_identity(&dir, &first.mnemonic, "pass one").unwrap();
+        let before = std::fs::read(identity_path(&dir)).unwrap();
+
+        let second = generate_identity().unwrap();
+        let err = store_identity(&dir, &second.mnemonic, "pass two").err().expect("must refuse");
+        assert!(err.to_string().contains("refusing to overwrite"));
+        assert_eq!(std::fs::read(identity_path(&dir)).unwrap(), before, "file untouched");
+        let node = LatticeNode::load(&dir, "pass one").expect("original still loads");
+        assert_eq!(node.peer_id_hex(), first.peer_id_hex);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn store_identity_writes_atomically_0600() {
+        let dir = tmp_dir("atomic");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A stale temp file from an earlier crash must not block or leak through.
+        std::fs::write(identity_path(&dir).with_extension("age.tmp"), b"junk").unwrap();
+        let id = generate_identity().unwrap();
+        store_identity(&dir, &id.mnemonic, "a passphrase").unwrap();
+        assert!(!identity_path(&dir).with_extension("age.tmp").exists(), "temp file renamed away");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(identity_path(&dir)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(LatticeNode::load(&dir, "a passphrase").is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
