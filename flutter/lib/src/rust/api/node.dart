@@ -34,6 +34,9 @@ Future<IdentitySummary> storeIdentity({
 bool identityExists({required String dir}) =>
     RustLib.instance.api.crateApiNodeIdentityExists(dir: dir);
 
+/// Max outgoing message size in UTF-8 bytes (for the UI's pre-check).
+int maxMessageBytes() => RustLib.instance.api.crateApiNodeMaxMessageBytes();
+
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<Node>>
 abstract class Node implements RustOpaqueInterface {
   /// Dial a peer by ticket (runs in the background; watch the event stream).
@@ -118,6 +121,13 @@ sealed class LatticeEvent with _$LatticeEvent {
       LatticeEvent_PeerDisconnected;
   const factory LatticeEvent.error({required String message}) =
       LatticeEvent_Error;
+
+  /// The peer failed authentication (forged handshake, bad resume proof,
+  /// identity/ticket mismatch) — distinct from a generic connect error.
+  const factory LatticeEvent.authFailed({
+    required String peerIdHex,
+    required String message,
+  }) = LatticeEvent_AuthFailed;
 }
 
 /// A freshly generated identity — mnemonic shown once, then stored.

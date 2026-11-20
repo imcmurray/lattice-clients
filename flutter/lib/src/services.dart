@@ -8,6 +8,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'validation.dart';
+
 /// The app-private directory holding the encrypted identity file.
 Future<String> identityDir() async {
   final base = await getApplicationSupportDirectory();
@@ -31,7 +33,7 @@ class SecureStore {
 
   Future<String> getOrCreatePassphrase() async {
     final existing = await _storage.read(key: _key);
-    if (existing != null && existing.isNotEmpty) return existing;
+    if (isUsablePassphrase(existing)) return existing!;
     final created = _randomPassphrase();
     await _storage.write(key: _key, value: created);
     return created;

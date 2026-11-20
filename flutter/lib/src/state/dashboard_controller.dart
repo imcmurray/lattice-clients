@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../rust/api/node.dart';
 import '../services.dart';
 import '../theme.dart';
+import '../validation.dart';
 import 'app_controller.dart';
 
 enum LogKind { info, signal, peer, message, error }
@@ -119,6 +120,8 @@ class DashboardController extends Notifier<DashboardState> {
       case LatticeEvent_Message(:final peerIdHex, :final body):
         _log(LogKind.message, '${_short(peerIdHex)} » $body');
         NotificationService.notifyBackground('Message · ${_short(peerIdHex)}', body);
+      case LatticeEvent_AuthFailed(:final peerIdHex, :final message):
+        _log(LogKind.error, 'Authentication failed · ${_short(peerIdHex)}: $message');
       case LatticeEvent_Error(:final message):
         _log(LogKind.error, message);
     }
@@ -179,6 +182,11 @@ class DashboardController extends Notifier<DashboardState> {
   Future<void> send(String peerIdHex, String body) async {
     final node = _node;
     if (node == null || body.isEmpty) return;
+    final tooLarge = messageSizeError(body, maxMessageBytes());
+    if (tooLarge != null) {
+      _log(LogKind.error, tooLarge);
+      return;
+    }
     try {
       await node.send(peerIdHex: peerIdHex, body: body);
       _log(LogKind.message, 'you » $body');

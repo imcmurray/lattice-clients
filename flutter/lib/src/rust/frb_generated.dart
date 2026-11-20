@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 383260810;
+  int get rustContentHash => 1387331890;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -110,6 +110,8 @@ abstract class RustLibApi extends BaseApi {
   bool crateApiNodeIdentityExists({required String dir});
 
   Future<void> crateApiNodeInitApp();
+
+  int crateApiNodeMaxMessageBytes();
 
   Future<IdentitySummary> crateApiNodeStoreIdentity({
     required String dir,
@@ -510,6 +512,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "init_app", argNames: []);
 
   @override
+  int crateApiNodeMaxMessageBytes() {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_32,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiNodeMaxMessageBytesConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNodeMaxMessageBytesConstMeta =>
+      const TaskConstMeta(debugName: "max_message_bytes", argNames: []);
+
+  @override
   Future<IdentitySummary> crateApiNodeStoreIdentity({
     required String dir,
     required String mnemonic,
@@ -525,7 +549,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 15,
             port: port_,
           );
         },
@@ -557,7 +581,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 16,
             port: port_,
           );
         },
@@ -688,6 +712,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         );
       case 8:
         return LatticeEvent_Error(message: dco_decode_String(raw[1]));
+      case 9:
+        return LatticeEvent_AuthFailed(
+          peerIdHex: dco_decode_String(raw[1]),
+          message: dco_decode_String(raw[2]),
+        );
       default:
         throw Exception("unreachable");
     }
@@ -862,6 +891,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 8:
         var var_message = sse_decode_String(deserializer);
         return LatticeEvent_Error(message: var_message);
+      case 9:
+        var var_peerIdHex = sse_decode_String(deserializer);
+        var var_message = sse_decode_String(deserializer);
+        return LatticeEvent_AuthFailed(
+          peerIdHex: var_peerIdHex,
+          message: var_message,
+        );
       default:
         throw UnimplementedError('');
     }
@@ -1056,6 +1092,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_String(peerIdHex, serializer);
       case LatticeEvent_Error(message: final message):
         sse_encode_i_32(8, serializer);
+        sse_encode_String(message, serializer);
+      case LatticeEvent_AuthFailed(
+        peerIdHex: final peerIdHex,
+        message: final message,
+      ):
+        sse_encode_i_32(9, serializer);
+        sse_encode_String(peerIdHex, serializer);
         sse_encode_String(message, serializer);
     }
   }

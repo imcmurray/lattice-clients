@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 383260810;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1387331890;
 
 // Section: executor
 
@@ -639,6 +639,35 @@ fn wire__crate__api__node__init_app_impl(
         },
     )
 }
+fn wire__crate__api__node__max_message_bytes_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "max_message_bytes",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(crate::api::node::max_message_bytes())?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__node__store_identity_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -847,6 +876,14 @@ impl SseDecode for crate::api::node::LatticeEvent {
                     message: var_message,
                 };
             }
+            9 => {
+                let mut var_peerIdHex = <String>::sse_decode(deserializer);
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::api::node::LatticeEvent::AuthFailed {
+                    peer_id_hex: var_peerIdHex,
+                    message: var_message,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -938,8 +975,8 @@ fn pde_ffi_dispatcher_primary_impl(
         8 => wire__crate__api__node__Node_send_impl(port, ptr, rust_vec_len, data_len),
         11 => wire__crate__api__node__generate_identity_impl(port, ptr, rust_vec_len, data_len),
         13 => wire__crate__api__node__init_app_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__node__store_identity_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__node__summarize_mnemonic_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__node__store_identity_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__node__summarize_mnemonic_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -960,6 +997,7 @@ fn pde_ffi_dispatcher_sync_impl(
         9 => wire__crate__api__node__Node_start_listening_impl(ptr, rust_vec_len, data_len),
         10 => wire__crate__api__node__Node_stop_listening_impl(ptr, rust_vec_len, data_len),
         12 => wire__crate__api__node__identity_exists_impl(ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__node__max_message_bytes_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1042,6 +1080,15 @@ impl flutter_rust_bridge::IntoDart for crate::api::node::LatticeEvent {
             crate::api::node::LatticeEvent::Error { message } => {
                 [8.into_dart(), message.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::node::LatticeEvent::AuthFailed {
+                peer_id_hex,
+                message,
+            } => [
+                9.into_dart(),
+                peer_id_hex.into_into_dart().into_dart(),
+                message.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -1180,6 +1227,14 @@ impl SseEncode for crate::api::node::LatticeEvent {
             }
             crate::api::node::LatticeEvent::Error { message } => {
                 <i32>::sse_encode(8, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::api::node::LatticeEvent::AuthFailed {
+                peer_id_hex,
+                message,
+            } => {
+                <i32>::sse_encode(9, serializer);
+                <String>::sse_encode(peer_id_hex, serializer);
                 <String>::sse_encode(message, serializer);
             }
             _ => {

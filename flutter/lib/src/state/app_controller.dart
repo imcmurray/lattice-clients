@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../rust/api/node.dart';
 import '../services.dart';
+import '../validation.dart';
 
 /// The top-level lifecycle of the app.
 sealed class AppStage {
@@ -89,7 +90,7 @@ class AppController extends Notifier<AppStage> {
       state = const StageLoading();
       final dir = await _dirPath();
       final pass = await _store.getPassphrase();
-      if (pass == null) {
+      if (pass == null || !isUsablePassphrase(pass)) {
         state = const StageError(
             'Stored identity found but its key is missing from the keystore. '
             'You may need to recover from your mnemonic.');

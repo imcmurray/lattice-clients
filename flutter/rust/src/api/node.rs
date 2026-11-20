@@ -217,6 +217,15 @@ pub enum LatticeEvent {
     Message { peer_id_hex: String, body: String },
     PeerDisconnected { peer_id_hex: String },
     Error { message: String },
+    /// The peer failed authentication (forged handshake, bad resume proof,
+    /// identity/ticket mismatch) — distinct from a generic connect error.
+    AuthFailed { peer_id_hex: String, message: String },
+}
+
+/// Max outgoing message size in UTF-8 bytes (for the UI's pre-check).
+#[frb(sync)]
+pub fn max_message_bytes() -> u32 {
+    lm::MAX_MESSAGE_BYTES as u32
 }
 
 impl From<NodeEvent> for LatticeEvent {
@@ -241,6 +250,9 @@ impl From<NodeEvent> for LatticeEvent {
                 LatticeEvent::PeerDisconnected { peer_id_hex }
             }
             NodeEvent::Error { message } => LatticeEvent::Error { message },
+            NodeEvent::AuthFailed { peer_id_hex, message } => {
+                LatticeEvent::AuthFailed { peer_id_hex, message }
+            }
         }
     }
 }
