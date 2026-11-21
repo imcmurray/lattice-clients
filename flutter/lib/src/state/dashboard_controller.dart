@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../peer_text.dart';
 import '../rust/api/node.dart';
 import '../services.dart';
 import '../theme.dart';
@@ -31,19 +32,34 @@ class PeerLink {
   final int? rttMs;
 }
 
+/// What the user can compare out of band for one connected peer: the peer's
+/// ROOT fingerprint and the safety number of both roots. Never auto-verified
+/// and never persisted.
+class PeerTrust {
+  const PeerTrust({required this.rootFingerprint, required this.safetyNumber});
+  final String rootFingerprint;
+  final String safetyNumber;
+}
+
 class DashboardState {
   const DashboardState({
     this.listening = false,
     this.ticket,
     this.peers = const <String>{},
     this.links = const <String, PeerLink>{},
+    this.trust = const <String, PeerTrust>{},
     this.log = const <LogLine>[],
   });
 
   final bool listening;
   final String? ticket;
+
+  /// Connected peers by DEVICE PeerId hex (the session key used by `send`).
   final Set<String> peers;
   final Map<String, PeerLink> links;
+
+  /// Trust details per connected peer (DEVICE PeerId hex); removed on disconnect.
+  final Map<String, PeerTrust> trust;
   final List<LogLine> log;
 
   DashboardState copyWith({
@@ -51,6 +67,7 @@ class DashboardState {
     String? ticket,
     Set<String>? peers,
     Map<String, PeerLink>? links,
+    Map<String, PeerTrust>? trust,
     List<LogLine>? log,
   }) =>
       DashboardState(
@@ -58,6 +75,7 @@ class DashboardState {
         ticket: ticket ?? this.ticket,
         peers: peers ?? this.peers,
         links: links ?? this.links,
+        trust: trust ?? this.trust,
         log: log ?? this.log,
       );
 }
@@ -95,13 +113,35 @@ class DashboardController extends Notifier<DashboardState> {
         state = state.copyWith(listening: false);
         _log(LogKind.signal, 'Stopped listening');
         _syncForegroundService();
-      case LatticeEvent_PeerConnected(:final peerIdHex):
-        state = state.copyWith(peers: {...state.peers, peerIdHex});
-        _log(LogKind.peer, 'Secure session up · ${_short(peerIdHex)}');
+      case LatticeEvent_PeerConnected(
+          :final peerIdHex,
+          :final rootFingerprint,
+          :final safetyNumber,
+        ):
+        state = state.copyWith(
+          peers: {...state.peers, peerIdHex},
+          trust: {
+            ...state.trust,
+            peerIdHex: PeerTrust(rootFingerprint: rootFingerprint, safetyNumber: safetyNumber),
+          },
+        );
+        _log(
+          LogKind.peer,
+          'Secure session up · ${_short(peerIdHex)} · root $rootFingerprint · '
+          'safety number $safetyNumber (unverified)',
+        );
         _syncForegroundService();
         NotificationService.notifyBackground(
             'Peer connected', '${_short(peerIdHex)} · secure session up');
-      case LatticeEvent_Resumed(:final peerIdHex):
+      case LatticeEvent_Resumed(
+          :final peerIdHex,
+          :final rootFingerprint,
+          :final safetyNumber,
+        ):
+        state = state.copyWith(trust: {
+          ...state.trust,
+          peerIdHex: PeerTrust(rootFingerprint: rootFingerprint, safetyNumber: safetyNumber),
+        });
         _log(LogKind.signal, 'Resumed without re-handshake · ${_short(peerIdHex)}');
       case LatticeEvent_Reconnecting(:final peerIdHex):
         _log(LogKind.info, 'Reconnecting to ${_short(peerIdHex)}…');
@@ -114,14 +154,18 @@ class DashboardController extends Notifier<DashboardState> {
         state = state.copyWith(
           peers: {...state.peers}..remove(peerIdHex),
           links: {...state.links}..remove(peerIdHex),
+          trust: {...state.trust}..remove(peerIdHex),
         );
         _log(LogKind.peer, 'Session closed · ${_short(peerIdHex)}');
         _syncForegroundService();
       case LatticeEvent_Message(:final peerIdHex, :final body):
         _log(LogKind.message, '${_short(peerIdHex)} » $body');
         NotificationService.notifyBackground('Message · ${_short(peerIdHex)}', body);
-      case LatticeEvent_AuthFailed(:final peerIdHex, :final message):
-        _log(LogKind.error, 'Authentication failed · ${_short(peerIdHex)}: $message');
+      case LatticeEvent_AuthFailed() ||
+            LatticeEvent_VersionMismatch() ||
+            LatticeEvent_PeerBusy() ||
+            LatticeEvent_BadTicket():
+        _log(LogKind.error, failureText(e) ?? e.toString());
       case LatticeEvent_Error(:final message):
         _log(LogKind.error, message);
     }
@@ -203,5 +247,5 @@ class DashboardController extends Notifier<DashboardState> {
     state = state.copyWith(log: next.length > 300 ? next.sublist(next.length - 300) : next);
   }
 
-  String _short(String hex) => hex.length <= 12 ? hex : '${hex.substring(0, 8)}…';
+  String _short(String hex) => shortPeerId(hex);
 }

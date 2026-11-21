@@ -830,14 +830,22 @@ impl SseDecode for crate::api::node::LatticeEvent {
             }
             2 => {
                 let mut var_peerIdHex = <String>::sse_decode(deserializer);
+                let mut var_rootFingerprint = <String>::sse_decode(deserializer);
+                let mut var_safetyNumber = <String>::sse_decode(deserializer);
                 return crate::api::node::LatticeEvent::PeerConnected {
                     peer_id_hex: var_peerIdHex,
+                    root_fingerprint: var_rootFingerprint,
+                    safety_number: var_safetyNumber,
                 };
             }
             3 => {
                 let mut var_peerIdHex = <String>::sse_decode(deserializer);
+                let mut var_rootFingerprint = <String>::sse_decode(deserializer);
+                let mut var_safetyNumber = <String>::sse_decode(deserializer);
                 return crate::api::node::LatticeEvent::Resumed {
                     peer_id_hex: var_peerIdHex,
+                    root_fingerprint: var_rootFingerprint,
+                    safety_number: var_safetyNumber,
                 };
             }
             4 => {
@@ -881,6 +889,26 @@ impl SseDecode for crate::api::node::LatticeEvent {
                 let mut var_message = <String>::sse_decode(deserializer);
                 return crate::api::node::LatticeEvent::AuthFailed {
                     peer_id_hex: var_peerIdHex,
+                    message: var_message,
+                };
+            }
+            10 => {
+                let mut var_peerIdHex = <String>::sse_decode(deserializer);
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::api::node::LatticeEvent::VersionMismatch {
+                    peer_id_hex: var_peerIdHex,
+                    message: var_message,
+                };
+            }
+            11 => {
+                let mut var_peerIdHex = <String>::sse_decode(deserializer);
+                return crate::api::node::LatticeEvent::PeerBusy {
+                    peer_id_hex: var_peerIdHex,
+                };
+            }
+            12 => {
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::api::node::LatticeEvent::BadTicket {
                     message: var_message,
                 };
             }
@@ -1048,12 +1076,28 @@ impl flutter_rust_bridge::IntoDart for crate::api::node::LatticeEvent {
                 [0.into_dart(), ticket.into_into_dart().into_dart()].into_dart()
             }
             crate::api::node::LatticeEvent::ListeningStopped => [1.into_dart()].into_dart(),
-            crate::api::node::LatticeEvent::PeerConnected { peer_id_hex } => {
-                [2.into_dart(), peer_id_hex.into_into_dart().into_dart()].into_dart()
-            }
-            crate::api::node::LatticeEvent::Resumed { peer_id_hex } => {
-                [3.into_dart(), peer_id_hex.into_into_dart().into_dart()].into_dart()
-            }
+            crate::api::node::LatticeEvent::PeerConnected {
+                peer_id_hex,
+                root_fingerprint,
+                safety_number,
+            } => [
+                2.into_dart(),
+                peer_id_hex.into_into_dart().into_dart(),
+                root_fingerprint.into_into_dart().into_dart(),
+                safety_number.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::node::LatticeEvent::Resumed {
+                peer_id_hex,
+                root_fingerprint,
+                safety_number,
+            } => [
+                3.into_dart(),
+                peer_id_hex.into_into_dart().into_dart(),
+                root_fingerprint.into_into_dart().into_dart(),
+                safety_number.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             crate::api::node::LatticeEvent::Reconnecting { peer_id_hex } => {
                 [4.into_dart(), peer_id_hex.into_into_dart().into_dart()].into_dart()
             }
@@ -1089,6 +1133,21 @@ impl flutter_rust_bridge::IntoDart for crate::api::node::LatticeEvent {
                 message.into_into_dart().into_dart(),
             ]
             .into_dart(),
+            crate::api::node::LatticeEvent::VersionMismatch {
+                peer_id_hex,
+                message,
+            } => [
+                10.into_dart(),
+                peer_id_hex.into_into_dart().into_dart(),
+                message.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::node::LatticeEvent::PeerBusy { peer_id_hex } => {
+                [11.into_dart(), peer_id_hex.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::node::LatticeEvent::BadTicket { message } => {
+                [12.into_dart(), message.into_into_dart().into_dart()].into_dart()
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1194,13 +1253,25 @@ impl SseEncode for crate::api::node::LatticeEvent {
             crate::api::node::LatticeEvent::ListeningStopped => {
                 <i32>::sse_encode(1, serializer);
             }
-            crate::api::node::LatticeEvent::PeerConnected { peer_id_hex } => {
+            crate::api::node::LatticeEvent::PeerConnected {
+                peer_id_hex,
+                root_fingerprint,
+                safety_number,
+            } => {
                 <i32>::sse_encode(2, serializer);
                 <String>::sse_encode(peer_id_hex, serializer);
+                <String>::sse_encode(root_fingerprint, serializer);
+                <String>::sse_encode(safety_number, serializer);
             }
-            crate::api::node::LatticeEvent::Resumed { peer_id_hex } => {
+            crate::api::node::LatticeEvent::Resumed {
+                peer_id_hex,
+                root_fingerprint,
+                safety_number,
+            } => {
                 <i32>::sse_encode(3, serializer);
                 <String>::sse_encode(peer_id_hex, serializer);
+                <String>::sse_encode(root_fingerprint, serializer);
+                <String>::sse_encode(safety_number, serializer);
             }
             crate::api::node::LatticeEvent::Reconnecting { peer_id_hex } => {
                 <i32>::sse_encode(4, serializer);
@@ -1235,6 +1306,22 @@ impl SseEncode for crate::api::node::LatticeEvent {
             } => {
                 <i32>::sse_encode(9, serializer);
                 <String>::sse_encode(peer_id_hex, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::api::node::LatticeEvent::VersionMismatch {
+                peer_id_hex,
+                message,
+            } => {
+                <i32>::sse_encode(10, serializer);
+                <String>::sse_encode(peer_id_hex, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            crate::api::node::LatticeEvent::PeerBusy { peer_id_hex } => {
+                <i32>::sse_encode(11, serializer);
+                <String>::sse_encode(peer_id_hex, serializer);
+            }
+            crate::api::node::LatticeEvent::BadTicket { message } => {
+                <i32>::sse_encode(12, serializer);
                 <String>::sse_encode(message, serializer);
             }
             _ => {
