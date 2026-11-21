@@ -51,13 +51,14 @@ where
 // ===========================================================================
 
 /// A freshly generated identity — mnemonic shown once, then stored.
+/// `peer_id_hex` is the ROOT PeerId; `fingerprint` the ROOT fingerprint.
 pub struct NewIdentity {
     pub mnemonic: String,
     pub peer_id_hex: String,
     pub fingerprint: String,
 }
 
-/// Public, non-secret summary of an identity.
+/// Public, non-secret summary of an identity: the ROOT PeerId and ROOT fingerprint.
 pub struct IdentitySummary {
     pub peer_id_hex: String,
     pub fingerprint: String,
@@ -139,13 +140,13 @@ impl Node {
         .await
     }
 
-    /// This node's stable PeerId, hex-encoded.
+    /// This node's stable ROOT PeerId, hex-encoded.
     #[frb(sync)]
     pub fn peer_id_hex(&self) -> String {
         self.inner.peer_id_hex()
     }
 
-    /// Short, comparable fingerprint of the PeerId.
+    /// The ROOT fingerprint (10 groups of 4 hex) — what peers compare out of band.
     #[frb(sync)]
     pub fn fingerprint(&self) -> String {
         self.inner.fingerprint()
@@ -181,7 +182,7 @@ impl Node {
         self.inner.connect(ticket);
     }
 
-    /// Send a UTF-8 message to a connected peer (by hex PeerId).
+    /// Send a UTF-8 message to a connected peer (by its DEVICE PeerId hex, as in events).
     pub async fn send(&self, peer_id_hex: String, body: String) -> Result<(), String> {
         let inner = Arc::clone(&self.inner);
         on_rt(async move { inner.send(peer_id_hex, body).await.map_err(|e| e.to_string()) }).await
@@ -202,12 +203,25 @@ impl Node {
     }
 }
 
-/// Dart-facing mirror of [`lattice_mobile::NodeEvent`].
+/// Dart-facing mirror of [`lattice_mobile::NodeEvent`]. Session events'
+/// `peer_id_hex` is the peer's DEVICE PeerId (the key `send` takes); the
+/// peer's ROOT shows up only as `root_fingerprint` and in `safety_number`.
 pub enum LatticeEvent {
     Listening { ticket: String },
     ListeningStopped,
-    PeerConnected { peer_id_hex: String },
-    Resumed { peer_id_hex: String },
+    /// An authenticated session is up (fresh or resumed). Show the peer's root
+    /// fingerprint and the safety number as unverified.
+    PeerConnected {
+        peer_id_hex: String,
+        root_fingerprint: String,
+        safety_number: String,
+    },
+    /// A dropped session was resumed without re-handshaking.
+    Resumed {
+        peer_id_hex: String,
+        root_fingerprint: String,
+        safety_number: String,
+    },
     Reconnecting { peer_id_hex: String },
     Link {
         peer_id_hex: String,
@@ -218,8 +232,15 @@ pub enum LatticeEvent {
     PeerDisconnected { peer_id_hex: String },
     Error { message: String },
     /// The peer failed authentication (forged handshake, bad resume proof,
-    /// identity/ticket mismatch) — distinct from a generic connect error.
+    /// bad certificate chain, identity/ticket mismatch) — distinct from a
+    /// generic connect error.
     AuthFailed { peer_id_hex: String, message: String },
+    /// The peer runs an incompatible Lattice wire version (not retried).
+    VersionMismatch { peer_id_hex: String, message: String },
+    /// The listener replied busy; the dialer retries with backoff.
+    PeerBusy { peer_id_hex: String },
+    /// `connect` got a malformed or old-version ticket; nothing was dialed.
+    BadTicket { message: String },
 }
 
 /// Max outgoing message size in UTF-8 bytes (for the UI's pre-check).
@@ -233,8 +254,24 @@ impl From<NodeEvent> for LatticeEvent {
         match e {
             NodeEvent::Listening { ticket } => LatticeEvent::Listening { ticket },
             NodeEvent::ListeningStopped => LatticeEvent::ListeningStopped,
-            NodeEvent::PeerConnected { peer_id_hex } => LatticeEvent::PeerConnected { peer_id_hex },
-            NodeEvent::Resumed { peer_id_hex } => LatticeEvent::Resumed { peer_id_hex },
+            NodeEvent::PeerConnected {
+                peer_id_hex,
+                root_fingerprint,
+                safety_number,
+            } => LatticeEvent::PeerConnected {
+                peer_id_hex,
+                root_fingerprint,
+                safety_number,
+            },
+            NodeEvent::Resumed {
+                peer_id_hex,
+                root_fingerprint,
+                safety_number,
+            } => LatticeEvent::Resumed {
+                peer_id_hex,
+                root_fingerprint,
+                safety_number,
+            },
             NodeEvent::Reconnecting { peer_id_hex } => LatticeEvent::Reconnecting { peer_id_hex },
             NodeEvent::Link {
                 peer_id_hex,
@@ -253,6 +290,11 @@ impl From<NodeEvent> for LatticeEvent {
             NodeEvent::AuthFailed { peer_id_hex, message } => {
                 LatticeEvent::AuthFailed { peer_id_hex, message }
             }
+            NodeEvent::VersionMismatch { peer_id_hex, message } => {
+                LatticeEvent::VersionMismatch { peer_id_hex, message }
+            }
+            NodeEvent::PeerBusy { peer_id_hex } => LatticeEvent::PeerBusy { peer_id_hex },
+            NodeEvent::BadTicket { message } => LatticeEvent::BadTicket { message },
         }
     }
 }

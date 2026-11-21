@@ -8,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import '../state/dashboard_controller.dart';
 import '../theme.dart';
 import '../widgets/lattice_mesh.dart';
+import '../widgets/peer_trust_card.dart';
 import '../widgets/ui.dart';
 import 'scan_screen.dart';
 
@@ -36,39 +37,60 @@ class DashboardScreen extends ConsumerWidget {
             child: Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 760),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _IdentityHeader(
-                      fingerprint: fingerprint,
-                      peerId: peerId,
-                      listening: state.listening,
-                      onToggle: ctrl.toggleListen,
-                      onShowTicket: () => _showTicket(context, ctrl, state.ticket),
-                    ),
-                    const SizedBox(height: 12),
-                    _ConnectBar(
-                      onConnect: ctrl.connect,
-                      onScan: _scanSupported
-                          ? () async {
-                              final t = await Navigator.of(context).push<String>(
-                                MaterialPageRoute(builder: (_) => const ScanScreen()),
-                              );
-                              if (t != null) ctrl.connect(t);
-                            }
-                          : null,
-                    ),
-                    if (state.peers.isNotEmpty) ...[
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Identity, connect and per-peer trust: scrolls (with a
+                      // visible scrollbar) when it doesn't fit, so the console
+                      // and send bar always keep their space.
+                      ConstrainedBox(
+                        constraints: BoxConstraints(maxHeight: constraints.maxHeight * 0.55),
+                        child: _TopSection(
+                          children: [
+                            _IdentityHeader(
+                              fingerprint: fingerprint,
+                              peerId: peerId,
+                              listening: state.listening,
+                              onToggle: ctrl.toggleListen,
+                              onShowTicket: () => _showTicket(context, ctrl, state.ticket),
+                            ),
+                            const SizedBox(height: 12),
+                            _ConnectBar(
+                              onConnect: ctrl.connect,
+                              onScan: _scanSupported
+                                  ? () async {
+                                      final t = await Navigator.of(context).push<String>(
+                                        MaterialPageRoute(builder: (_) => const ScanScreen()),
+                                      );
+                                      if (t != null) ctrl.connect(t);
+                                    }
+                                  : null,
+                            ),
+                            if (state.peers.isNotEmpty) ...[
+                              const SizedBox(height: 12),
+                              _LinksBar(peers: state.peers, links: state.links),
+                            ],
+                            for (final p in state.peers)
+                              if (state.trust[p] case final trust?) ...[
+                                const SizedBox(height: 12),
+                                PeerTrustCard(
+                                  peerIdHex: p,
+                                  rootFingerprint: trust.rootFingerprint,
+                                  safetyNumber: trust.safetyNumber,
+                                ),
+                              ],
+                          ],
+                        ),
+                      ),
                       const SizedBox(height: 12),
-                      _LinksBar(peers: state.peers, links: state.links),
+                      Expanded(child: _Console(log: state.log, onClear: ctrl.clearLog)),
+                      if (state.peers.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        _SendBar(peers: state.peers, onSend: ctrl.send),
+                      ],
                     ],
-                    const SizedBox(height: 12),
-                    Expanded(child: _Console(log: state.log, onClear: ctrl.clearLog)),
-                    if (state.peers.isNotEmpty) ...[
-                      const SizedBox(height: 12),
-                      _SendBar(peers: state.peers, onSend: ctrl.send),
-                    ],
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -85,6 +107,41 @@ class DashboardScreen extends ConsumerWidget {
     await showDialog<void>(
       context: context,
       builder: (_) => _TicketDialog(ticket: ticket),
+    );
+  }
+}
+
+/// The upper dashboard section: a vertical scroll view with an always-visible
+/// scrollbar thumb (shown only when the content overflows).
+class _TopSection extends StatefulWidget {
+  const _TopSection({required this.children});
+  final List<Widget> children;
+
+  @override
+  State<_TopSection> createState() => _TopSectionState();
+}
+
+class _TopSectionState extends State<_TopSection> {
+  final _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scrollbar(
+      controller: _scroll,
+      thumbVisibility: true,
+      child: SingleChildScrollView(
+        controller: _scroll,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: widget.children,
+        ),
+      ),
     );
   }
 }
@@ -122,7 +179,12 @@ class _IdentityHeader extends StatelessWidget {
           const SizedBox(height: 16),
           const SectionLabel('Fingerprint', color: Lx.violet),
           const SizedBox(height: 6),
-          Text(fingerprint, style: mono(size: 22, color: Lx.text, weight: FontWeight.w700)),
+          // The full ROOT fingerprint (10 groups of 4 hex); wraps on narrow screens.
+          Text(
+            fingerprint,
+            softWrap: true,
+            style: mono(size: 18, color: Lx.text, weight: FontWeight.w700),
+          ),
           const SizedBox(height: 12),
           const SectionLabel('PeerId'),
           CopyableValue(
@@ -393,8 +455,8 @@ class _SendBarState extends State<_SendBar> {
   }
 }
 
-/// The PQ-hybrid ticket carries kilobytes of public keys, so it cannot fit in a
-/// QR code — it's shared as copyable text.
+/// The connect ticket (v3) is compact — the iroh address plus our root and
+/// device PeerIds — so it is shown as a QR code, with share / copy of the text.
 class _TicketDialog extends ConsumerWidget {
   const _TicketDialog({required this.ticket});
   final String ticket;

@@ -690,9 +690,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 1:
         return LatticeEvent_ListeningStopped();
       case 2:
-        return LatticeEvent_PeerConnected(peerIdHex: dco_decode_String(raw[1]));
+        return LatticeEvent_PeerConnected(
+          peerIdHex: dco_decode_String(raw[1]),
+          rootFingerprint: dco_decode_String(raw[2]),
+          safetyNumber: dco_decode_String(raw[3]),
+        );
       case 3:
-        return LatticeEvent_Resumed(peerIdHex: dco_decode_String(raw[1]));
+        return LatticeEvent_Resumed(
+          peerIdHex: dco_decode_String(raw[1]),
+          rootFingerprint: dco_decode_String(raw[2]),
+          safetyNumber: dco_decode_String(raw[3]),
+        );
       case 4:
         return LatticeEvent_Reconnecting(peerIdHex: dco_decode_String(raw[1]));
       case 5:
@@ -717,6 +725,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           peerIdHex: dco_decode_String(raw[1]),
           message: dco_decode_String(raw[2]),
         );
+      case 10:
+        return LatticeEvent_VersionMismatch(
+          peerIdHex: dco_decode_String(raw[1]),
+          message: dco_decode_String(raw[2]),
+        );
+      case 11:
+        return LatticeEvent_PeerBusy(peerIdHex: dco_decode_String(raw[1]));
+      case 12:
+        return LatticeEvent_BadTicket(message: dco_decode_String(raw[1]));
       default:
         throw Exception("unreachable");
     }
@@ -865,10 +882,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         return LatticeEvent_ListeningStopped();
       case 2:
         var var_peerIdHex = sse_decode_String(deserializer);
-        return LatticeEvent_PeerConnected(peerIdHex: var_peerIdHex);
+        var var_rootFingerprint = sse_decode_String(deserializer);
+        var var_safetyNumber = sse_decode_String(deserializer);
+        return LatticeEvent_PeerConnected(
+          peerIdHex: var_peerIdHex,
+          rootFingerprint: var_rootFingerprint,
+          safetyNumber: var_safetyNumber,
+        );
       case 3:
         var var_peerIdHex = sse_decode_String(deserializer);
-        return LatticeEvent_Resumed(peerIdHex: var_peerIdHex);
+        var var_rootFingerprint = sse_decode_String(deserializer);
+        var var_safetyNumber = sse_decode_String(deserializer);
+        return LatticeEvent_Resumed(
+          peerIdHex: var_peerIdHex,
+          rootFingerprint: var_rootFingerprint,
+          safetyNumber: var_safetyNumber,
+        );
       case 4:
         var var_peerIdHex = sse_decode_String(deserializer);
         return LatticeEvent_Reconnecting(peerIdHex: var_peerIdHex);
@@ -898,6 +927,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           peerIdHex: var_peerIdHex,
           message: var_message,
         );
+      case 10:
+        var var_peerIdHex = sse_decode_String(deserializer);
+        var var_message = sse_decode_String(deserializer);
+        return LatticeEvent_VersionMismatch(
+          peerIdHex: var_peerIdHex,
+          message: var_message,
+        );
+      case 11:
+        var var_peerIdHex = sse_decode_String(deserializer);
+        return LatticeEvent_PeerBusy(peerIdHex: var_peerIdHex);
+      case 12:
+        var var_message = sse_decode_String(deserializer);
+        return LatticeEvent_BadTicket(message: var_message);
       default:
         throw UnimplementedError('');
     }
@@ -1065,12 +1107,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_String(ticket, serializer);
       case LatticeEvent_ListeningStopped():
         sse_encode_i_32(1, serializer);
-      case LatticeEvent_PeerConnected(peerIdHex: final peerIdHex):
+      case LatticeEvent_PeerConnected(
+        peerIdHex: final peerIdHex,
+        rootFingerprint: final rootFingerprint,
+        safetyNumber: final safetyNumber,
+      ):
         sse_encode_i_32(2, serializer);
         sse_encode_String(peerIdHex, serializer);
-      case LatticeEvent_Resumed(peerIdHex: final peerIdHex):
+        sse_encode_String(rootFingerprint, serializer);
+        sse_encode_String(safetyNumber, serializer);
+      case LatticeEvent_Resumed(
+        peerIdHex: final peerIdHex,
+        rootFingerprint: final rootFingerprint,
+        safetyNumber: final safetyNumber,
+      ):
         sse_encode_i_32(3, serializer);
         sse_encode_String(peerIdHex, serializer);
+        sse_encode_String(rootFingerprint, serializer);
+        sse_encode_String(safetyNumber, serializer);
       case LatticeEvent_Reconnecting(peerIdHex: final peerIdHex):
         sse_encode_i_32(4, serializer);
         sse_encode_String(peerIdHex, serializer);
@@ -1099,6 +1153,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ):
         sse_encode_i_32(9, serializer);
         sse_encode_String(peerIdHex, serializer);
+        sse_encode_String(message, serializer);
+      case LatticeEvent_VersionMismatch(
+        peerIdHex: final peerIdHex,
+        message: final message,
+      ):
+        sse_encode_i_32(10, serializer);
+        sse_encode_String(peerIdHex, serializer);
+        sse_encode_String(message, serializer);
+      case LatticeEvent_PeerBusy(peerIdHex: final peerIdHex):
+        sse_encode_i_32(11, serializer);
+        sse_encode_String(peerIdHex, serializer);
+      case LatticeEvent_BadTicket(message: final message):
+        sse_encode_i_32(12, serializer);
         sse_encode_String(message, serializer);
     }
   }
@@ -1189,7 +1256,7 @@ class NodeImpl extends RustOpaque implements Node {
   Stream<LatticeEvent> events() =>
       RustLib.instance.api.crateApiNodeNodeEvents(that: this);
 
-  /// Short, comparable fingerprint of the PeerId.
+  /// The ROOT fingerprint (10 groups of 4 hex) — what peers compare out of band.
   String fingerprint() =>
       RustLib.instance.api.crateApiNodeNodeFingerprint(that: this);
 
@@ -1201,11 +1268,11 @@ class NodeImpl extends RustOpaque implements Node {
   Future<String> myTicket() =>
       RustLib.instance.api.crateApiNodeNodeMyTicket(that: this);
 
-  /// This node's stable PeerId, hex-encoded.
+  /// This node's stable ROOT PeerId, hex-encoded.
   String peerIdHex() =>
       RustLib.instance.api.crateApiNodeNodePeerIdHex(that: this);
 
-  /// Send a UTF-8 message to a connected peer (by hex PeerId).
+  /// Send a UTF-8 message to a connected peer (by its DEVICE PeerId hex, as in events).
   Future<void> send({required String peerIdHex, required String body}) =>
       RustLib.instance.api.crateApiNodeNodeSend(
         that: this,

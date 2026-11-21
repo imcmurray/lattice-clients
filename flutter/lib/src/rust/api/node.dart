@@ -46,7 +46,7 @@ abstract class Node implements RustOpaqueInterface {
   /// that pushes each event into Dart until the node is torn down.
   Stream<LatticeEvent> events();
 
-  /// Short, comparable fingerprint of the PeerId.
+  /// The ROOT fingerprint (10 groups of 4 hex) — what peers compare out of band.
   String fingerprint();
 
   /// The 24-word backup mnemonic — gate behind biometric + explicit intent.
@@ -63,10 +63,10 @@ abstract class Node implements RustOpaqueInterface {
         passphrase: passphrase,
       );
 
-  /// This node's stable PeerId, hex-encoded.
+  /// This node's stable ROOT PeerId, hex-encoded.
   String peerIdHex();
 
-  /// Send a UTF-8 message to a connected peer (by hex PeerId).
+  /// Send a UTF-8 message to a connected peer (by its DEVICE PeerId hex, as in events).
   Future<void> send({required String peerIdHex, required String body});
 
   /// Go online + accept connections; emits a `Listening` event with the ticket.
@@ -76,7 +76,7 @@ abstract class Node implements RustOpaqueInterface {
   void stopListening();
 }
 
-/// Public, non-secret summary of an identity.
+/// Public, non-secret summary of an identity: the ROOT PeerId and ROOT fingerprint.
 class IdentitySummary {
   final String peerIdHex;
   final String fingerprint;
@@ -102,10 +102,21 @@ sealed class LatticeEvent with _$LatticeEvent {
   const factory LatticeEvent.listening({required String ticket}) =
       LatticeEvent_Listening;
   const factory LatticeEvent.listeningStopped() = LatticeEvent_ListeningStopped;
-  const factory LatticeEvent.peerConnected({required String peerIdHex}) =
-      LatticeEvent_PeerConnected;
-  const factory LatticeEvent.resumed({required String peerIdHex}) =
-      LatticeEvent_Resumed;
+
+  /// An authenticated session is up (fresh or resumed). Show the peer's root
+  /// fingerprint and the safety number as unverified.
+  const factory LatticeEvent.peerConnected({
+    required String peerIdHex,
+    required String rootFingerprint,
+    required String safetyNumber,
+  }) = LatticeEvent_PeerConnected;
+
+  /// A dropped session was resumed without re-handshaking.
+  const factory LatticeEvent.resumed({
+    required String peerIdHex,
+    required String rootFingerprint,
+    required String safetyNumber,
+  }) = LatticeEvent_Resumed;
   const factory LatticeEvent.reconnecting({required String peerIdHex}) =
       LatticeEvent_Reconnecting;
   const factory LatticeEvent.link({
@@ -123,14 +134,30 @@ sealed class LatticeEvent with _$LatticeEvent {
       LatticeEvent_Error;
 
   /// The peer failed authentication (forged handshake, bad resume proof,
-  /// identity/ticket mismatch) — distinct from a generic connect error.
+  /// bad certificate chain, identity/ticket mismatch) — distinct from a
+  /// generic connect error.
   const factory LatticeEvent.authFailed({
     required String peerIdHex,
     required String message,
   }) = LatticeEvent_AuthFailed;
+
+  /// The peer runs an incompatible Lattice wire version (not retried).
+  const factory LatticeEvent.versionMismatch({
+    required String peerIdHex,
+    required String message,
+  }) = LatticeEvent_VersionMismatch;
+
+  /// The listener replied busy; the dialer retries with backoff.
+  const factory LatticeEvent.peerBusy({required String peerIdHex}) =
+      LatticeEvent_PeerBusy;
+
+  /// `connect` got a malformed or old-version ticket; nothing was dialed.
+  const factory LatticeEvent.badTicket({required String message}) =
+      LatticeEvent_BadTicket;
 }
 
 /// A freshly generated identity — mnemonic shown once, then stored.
+/// `peer_id_hex` is the ROOT PeerId; `fingerprint` the ROOT fingerprint.
 class NewIdentity {
   final String mnemonic;
   final String peerIdHex;

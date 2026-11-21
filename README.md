@@ -35,9 +35,10 @@ flutter/rust/lattice-mobile     FFI-safe facade (LatticeNode + NodeEvent)
 `lattice-mobile` exists because Flutter can't bridge Lattice's generic
 `ConnectedSession<C>` / async traits directly. It exposes one concrete
 `LatticeNode` that owns a tokio runtime, the iroh transport (bound lazily), and
-the live peer sessions, and emits a `NodeEvent` stream the UI subscribes to. Its
-wire preamble matches Lattice's `lattice-net` reference CLI, so the app
-interoperates with it.
+the live peer sessions, and emits a `NodeEvent` stream the UI subscribes to. It
+speaks Lattice's `lattice-net` wire protocol (WIRE_VERSION 2: listener hello,
+v3 handshake with channel binding, sealed auth bundle, resume-v2 proofs), so the
+app and the `lattice-net` CLI can dial each other in both directions.
 
 ## First client: Lattice Node (control harness)
 
@@ -89,12 +90,15 @@ See [`docs/m2-testing.md`](docs/m2-testing.md) for the two-node test procedure.
 
 ## Notes
 
-- **Compact ticket:** rather than embed the full PQ public-key bundle (~26 KB, far
-  past a QR's ceiling), the ticket carries only the iroh address + the 32-byte
-  PeerId. Since `PeerId = BLAKE3(all public keys)`, the dialer fetches the keys
-  over the wire and verifies they hash to that PeerId — same security, but small
-  enough for a **single QR + camera scan**. (Wire protocol differs from the
-  `lattice-net` CLI as a result.)
+- **Ticket v3 (QR-sized):** Lattice's ticket carries the iroh address plus the
+  32-byte root and device PeerIds (~430 hex chars), small enough for a **single
+  QR + camera scan**. The listener's hello (device identity, root identity,
+  root-signed DeviceCert) is checked against those ids before the handshake.
+- **Root + device keys:** the recovery phrase is the *root*; each install has its
+  own device key (age-encrypted next to the root as `device.age`) certified by the
+  root for 30 days and renewed on open within 7 days of expiry. Compare the peer's
+  **root fingerprint** or the **safety number** out of band; peers show as
+  unverified until you do.
 - Building for Android with Gradle 9 required patching the vendored cargokit to use
   the injected `ExecOperations` service (Gradle 9 removed `Project.exec()`).
 - The **direct-vs-relay** chip reads iroh 1.0.1's *selected* path (`is_ip` vs

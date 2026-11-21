@@ -2,62 +2,77 @@
 //!
 //! Two concerns, deliberately separated:
 //!
-//! * **Identity at rest** — free functions that generate / recover an identity
-//!   and encrypt the BIP39 mnemonic under a passphrase (age scrypt) to
+//! * **Identity at rest** — free functions that generate / recover a ROOT
+//!   identity and encrypt its BIP39 mnemonic under a passphrase (age scrypt) to
 //!   `<dir>/identity.age`. Pure crypto + disk: no network, no async. The
-//!   passphrase itself is held by the platform keystore on the Dart side.
+//!   passphrase itself is held by the platform keystore on the Dart side. Next
+//!   to it, [`LatticeNode::load`] keeps a separate Hybrid DEVICE key
+//!   (`device.age`, the device mnemonic) and its root-signed `DeviceCert`
+//!   (`device.cert.age`, 30-day lifetime, renewed at load within 7 days of
+//!   expiry), both age-encrypted under the same passphrase.
 //! * **The live node** — [`LatticeNode`] owns the tokio runtime, the iroh
 //!   transport (bound lazily), and the live peer sessions, and emits a
 //!   [`NodeEvent`] stream. Transport binding is decoupled from identity load so
-//!   the UI can show the PeerId instantly and go online only when asked.
+//!   the UI can show the identity instantly and go online only when asked.
 //!
 //! All cryptography and transport live in the audited Lattice crates; this is
-//! glue only. The wire preamble matches the `lattice-net` reference CLI:
+//! glue only. The wire protocol is exactly `lattice-net`'s (WIRE_VERSION 2, see
+//! the `wire` module), so mobile and `lattice-net` nodes interoperate:
 //!
-//! * dialer → listener: `[mode] || dialer_nonce[32] || identity`
-//!   (`mode` 0 = fresh with an all-zero nonce, 1 = resume with a random nonce)
-//! * listener → dialer, fresh: `[0] || identity`, then the signed v2 handshake
-//! * listener → dialer, resume: `[2] || listener_nonce[32] || listener_tag[32]
-//!   || identity` (a challenge), answered by the dialer with one frame holding
-//!   its 32-byte tag. Both tags are session-bound HMACs from `lattice-session`;
-//!   the kept session is only consumed once the dialer's tag verifies.
+//! * The ticket (v3) is the iroh address plus our ROOT and DEVICE PeerIds.
+//! * The dialer's preamble is `[2] ‖ [mode] ‖ nonce[32] ‖ device identity`; the
+//!   listener always answers with a hello (its device identity plus an auth
+//!   bundle: root identity, device cert, optional revocation list), which the
+//!   dialer checks against the ticket's ids before sending anything else.
+//! * Then either a fresh device-key handshake followed by a sealed auth-bundle
+//!   exchange, or a resume with mutual HMAC proofs. Both are bound to the two
+//!   iroh endpoint ids (`lattice-net-cb-v1`).
+//! * A listener with no room replies `[3]` (busy); a preamble of another wire
+//!   version gets `[4, 2]`.
 //!
-//! The retired decision byte 1 (unauthenticated resume) is rejected.
+//! The UI compares the peer's ROOT fingerprint and a safety number derived
+//! from both roots out of band; nothing is marked verified automatically.
+//! Inbound attempts pass the `lattice-net` flood limiter (`flood` module)
+//! before any task is spawned.
 #![forbid(unsafe_code)]
 
+mod flood;
+mod wire;
+
 use std::collections::HashMap;
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use lattice::identity::safety_number;
 use lattice::prelude::*;
-use lattice::session::{resume_nonce, ResumeRole};
-use lattice::transport::{read_frame, write_frame, IrohConn, IrohTransport};
+use lattice::transport::{
+    encode_ticket, parse_ticket, read_frame, write_frame, IncomingConn, IrohConn, IrohTransport,
+    ParsedTicket, TicketAddr,
+};
 use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
 use tokio::task::AbortHandle;
 use zeroize::Zeroizing;
+
+use wire::{
+    channel_binding, check_endpoint, classify_failure, lock, CertStatus, DeviceCreds,
+    FailureKind, KeptPeer, KeptSessions, ListenGuard, PeerAuth, RevocationCache, SourceKey,
+};
 
 /// 32-byte PeerId, used as the session map key.
 type PeerKey = [u8; 32];
 
-// Connection preamble (matches lattice-net); see the module docs.
-const MODE_FRESH: u8 = 0;
-const MODE_RESUME: u8 = 1;
-const DECISION_FRESH: u8 = 0;
-/// Retired: the old unauthenticated resume. A dialer that receives it errors.
-const DECISION_RESUMED: u8 = 1;
-const DECISION_CHALLENGE: u8 = 2;
-const NONCE_LEN: usize = 32;
-const TAG_LEN: usize = 32;
-const MIN_PREAMBLE_LEN: usize = 1 + NONCE_LEN;
-const RESUME_TAG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Core `read_frame` cap.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 /// Max outgoing plaintext (UTF-8 bytes) per message: 60 KiB, a 4 KiB margin for
 /// `SecureSession` framing overhead.
 pub const MAX_MESSAGE_BYTES: usize = 60 * 1024;
 const IDENTITY_FILE: &str = "identity.age";
+/// age(passphrase, device mnemonic UTF-8).
+const DEVICE_FILE: &str = "device.age";
+/// age(passphrase, `DeviceCert::to_bytes()`).
+const DEVICE_CERT_FILE: &str = "device.cert.age";
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -72,31 +87,40 @@ pub fn runtime() -> &'static Runtime {
     })
 }
 
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 // ===========================================================================
 // Identity at rest (offline)
 // ===========================================================================
 
 /// A freshly generated identity, not yet persisted. The mnemonic is the only
 /// way to recover it — show it once, confirm it, then [`store_identity`].
+/// `peer_id_hex` / `fingerprint` describe the ROOT identity.
 pub struct NewIdentity {
     pub mnemonic: String,
     pub peer_id_hex: String,
     pub fingerprint: String,
 }
 
-/// Public, non-secret summary of an identity.
+/// Public, non-secret summary of a ROOT identity: its PeerId hex and
+/// `PeerId::fingerprint()` (10 groups of 4 hex).
 pub struct IdentitySummary {
     pub peer_id_hex: String,
     pub fingerprint: String,
 }
 
-/// Generate a brand-new PQ-hybrid identity. Pure crypto: no network, no disk.
+/// Generate a brand-new PQ-hybrid root identity. Pure crypto: no network, no disk.
 pub fn generate_identity() -> Result<NewIdentity> {
     let kp = Keypair::generate(CryptoSuite::Hybrid)?;
     Ok(NewIdentity {
         mnemonic: kp.mnemonic().to_string(),
         peer_id_hex: peer_hex(&kp),
-        fingerprint: fingerprint(&kp),
+        fingerprint: kp.peer_id().fingerprint(),
     })
 }
 
@@ -106,7 +130,7 @@ pub fn summarize_mnemonic(mnemonic: &str) -> Result<IdentitySummary> {
     let kp = Keypair::from_mnemonic(CryptoSuite::Hybrid, mnemonic)?;
     Ok(IdentitySummary {
         peer_id_hex: peer_hex(&kp),
-        fingerprint: fingerprint(&kp),
+        fingerprint: kp.peer_id().fingerprint(),
     })
 }
 
@@ -127,10 +151,8 @@ pub fn store_identity(dir: &str, mnemonic: &str, passphrase: &str) -> Result<Ide
         ));
     }
     std::fs::create_dir_all(dir).map_err(|e| Error::Other(format!("create dir: {e}")))?;
-    let recipient = age::scrypt::Recipient::new(secret(passphrase));
-    let ct = age::encrypt(&recipient, mnemonic.as_bytes())
-        .map_err(|e| Error::Crypto(format!("age encrypt: {e}")))?;
-    write_file_0600(&identity_path(dir), &ct)?;
+    let ct = encrypt(passphrase, mnemonic.as_bytes())?;
+    write_file_0600(&identity_path(dir), &ct, WriteMode::Replace)?;
     Ok(summary)
 }
 
@@ -161,13 +183,17 @@ fn identity_path(dir: &str) -> PathBuf {
     Path::new(dir).join(IDENTITY_FILE)
 }
 
+fn device_path(dir: &str) -> PathBuf {
+    Path::new(dir).join(DEVICE_FILE)
+}
+
+fn device_cert_path(dir: &str) -> PathBuf {
+    Path::new(dir).join(DEVICE_CERT_FILE)
+}
+
 fn load_mnemonic(dir: &str, passphrase: &str) -> Result<Zeroizing<String>> {
-    let ct = std::fs::read(identity_path(dir))
-        .map_err(|e| Error::Other(format!("read identity: {e}")))?;
-    let identity = age::scrypt::Identity::new(secret(passphrase));
-    let pt = age::decrypt(&identity, &ct)
-        .map_err(|e| Error::Crypto(format!("decrypt failed (wrong passphrase?): {e}")))?;
-    String::from_utf8(pt)
+    let pt = decrypt_file(&identity_path(dir), passphrase, "identity")?;
+    String::from_utf8(pt.to_vec())
         .map(Zeroizing::new)
         .map_err(|_| Error::Crypto("stored identity is not valid UTF-8".into()))
 }
@@ -176,22 +202,55 @@ fn secret(p: &str) -> age::secrecy::SecretString {
     age::secrecy::SecretString::from(p.to_owned())
 }
 
+/// age-scrypt encrypt `plaintext` under `passphrase`.
+fn encrypt(passphrase: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+    let recipient = age::scrypt::Recipient::new(secret(passphrase));
+    age::encrypt(&recipient, plaintext).map_err(|e| Error::Crypto(format!("age encrypt: {e}")))
+}
+
+/// Read and age-scrypt decrypt `path` (`what` names it in errors).
+fn decrypt_file(path: &Path, passphrase: &str, what: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let ct = std::fs::read(path).map_err(|e| Error::Other(format!("read {what}: {e}")))?;
+    let identity = age::scrypt::Identity::new(secret(passphrase));
+    age::decrypt(&identity, &ct)
+        .map(Zeroizing::new)
+        .map_err(|e| Error::Crypto(format!("decrypt failed (wrong passphrase?): {e}")))
+}
+
 fn peer_hex(kp: &Keypair) -> String {
     hex::encode(kp.peer_id().0)
 }
 
-/// A short, human-comparable fingerprint: first 4 and last 4 bytes of the PeerId.
-fn fingerprint(kp: &Keypair) -> String {
-    let id = kp.peer_id().0;
-    format!("{}…{}", hex::encode(&id[..4]), hex::encode(&id[28..]))
+/// How [`write_file_0600`] puts the finished temp file in place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriteMode {
+    /// Rename over any existing file (atomic replace).
+    Replace,
+    /// Create only: fail if the target exists, never overwrite it.
+    CreateNew,
 }
 
-/// Atomically create `path` (mode `0600` on unix) with `bytes`: write a sibling
-/// temp file, fsync it, then rename it into place. A crash leaves either no
-/// identity or the complete one, never a truncated file.
-fn write_file_0600(path: &Path, bytes: &[u8]) -> Result<()> {
+/// The sibling temp file for `path`: its file name plus `.tmp`
+/// (`identity.age.tmp`, `device.age.tmp`, `device.cert.age.tmp`).
+fn temp_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".tmp");
+    PathBuf::from(s)
+}
+
+/// Atomically write `path` (mode `0600` on unix) with `bytes`: write a sibling
+/// temp file, fsync it, then move it into place. A crash leaves either no
+/// file or the complete one, never a truncated file. With
+/// [`WriteMode::CreateNew`] the move is a hard link that fails if `path`
+/// already exists (falling back to an exists check plus rename where hard
+/// links are unavailable), so an existing file is never replaced.
+fn write_file_0600(path: &Path, bytes: &[u8], mode: WriteMode) -> Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension("age.tmp");
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let tmp = temp_path(path);
     let _ = std::fs::remove_file(&tmp); // stale temp from an earlier crash
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
@@ -204,7 +263,27 @@ fn write_file_0600(path: &Path, bytes: &[u8]) -> Result<()> {
         let mut f = opts.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
-        std::fs::rename(&tmp, path)?;
+        match mode {
+            WriteMode::Replace => std::fs::rename(&tmp, path)?,
+            WriteMode::CreateNew => {
+                match std::fs::hard_link(&tmp, path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+                    // Hard links can be unavailable (e.g. denied by Android's
+                    // SELinux policy for app data): re-check, then rename.
+                    // The check-then-rename has a TOCTOU window; that is
+                    // acceptable because only this single app process writes
+                    // these files.
+                    Err(_) => {
+                        if path.exists() {
+                            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+                        }
+                        std::fs::rename(&tmp, path)?;
+                    }
+                }
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
         #[cfg(unix)]
         if let Some(parent) = path.parent() {
             std::fs::File::open(parent)?.sync_all()?; // persist the rename
@@ -213,9 +292,105 @@ fn write_file_0600(path: &Path, bytes: &[u8]) -> Result<()> {
     })();
     if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
-        return Err(Error::Other(format!("write identity file: {e}")));
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(Error::Other(format!(
+                "{name} already exists; refusing to overwrite it"
+            )));
+        }
+        return Err(Error::Other(format!("write {name}: {e}")));
     }
     Ok(())
+}
+
+/// Load this install's device key and certificate, provisioning them if the
+/// install has none yet (migration of root-only installs) and renewing the
+/// certificate within [`wire::DEVICE_RENEW_WINDOW`] of expiry (or once expired).
+///
+/// Fails closed: a `device.age` that does not decrypt or parse, an orphan
+/// `device.cert.age`, or a certificate for another device / root (or with a bad
+/// signature) is an error and nothing is regenerated. `device.age` is never
+/// overwritten; certificate renewal is the only replacement of an existing file.
+pub(crate) fn load_or_provision_device(
+    dir: &str,
+    passphrase: &str,
+    root: &Keypair,
+    now: u64,
+) -> Result<DeviceCreds> {
+    validate_passphrase(passphrase)?;
+    let dev_path = device_path(dir);
+    let cert_path = device_cert_path(dir);
+    let lifetime = wire::DEVICE_CERT_LIFETIME.as_secs();
+
+    let device = if dev_path.exists() {
+        let pt = decrypt_file(&dev_path, passphrase, "device key")?;
+        let mnemonic = std::str::from_utf8(&pt)
+            .map_err(|_| Error::Crypto("stored device key is not valid UTF-8".into()))?;
+        Keypair::from_mnemonic(CryptoSuite::Hybrid, mnemonic)
+            .map_err(|e| Error::Crypto(format!("stored device key is invalid: {e}")))?
+    } else {
+        if cert_path.exists() {
+            return Err(Error::Other(format!(
+                "{DEVICE_CERT_FILE} exists without {DEVICE_FILE}; refusing to provision a new device key"
+            )));
+        }
+        let device = Keypair::generate(CryptoSuite::Hybrid)?;
+        if device.peer_id() == root.peer_id() {
+            return Err(Error::Crypto("device key must differ from the root".into()));
+        }
+        std::fs::create_dir_all(dir).map_err(|e| Error::Other(format!("create dir: {e}")))?;
+        let ct = encrypt(passphrase, device.mnemonic().as_bytes())?;
+        write_file_0600(&dev_path, &ct, WriteMode::CreateNew)?;
+        device
+    };
+
+    let cert = if cert_path.exists() {
+        let pt = decrypt_file(&cert_path, passphrase, "device certificate")?;
+        let cert = DeviceCert::from_bytes(&pt)
+            .map_err(|e| Error::Crypto(format!("stored device certificate is invalid: {e}")))?;
+        if cert.device().peer_id() != device.peer_id() {
+            return Err(Error::Verify(
+                "stored device certificate is for a different device".into(),
+            ));
+        }
+        if *cert.root() != root.peer_id() {
+            return Err(Error::Verify(
+                "stored device certificate is from a different root".into(),
+            ));
+        }
+        if !cert.verify(root.public(), 0) {
+            return Err(Error::Verify(
+                "stored device certificate does not verify under the root".into(),
+            ));
+        }
+        cert
+    } else {
+        let cert = root.authorize_device(device.public(), now + lifetime)?;
+        let ct = encrypt(passphrase, &cert.to_bytes())?;
+        write_file_0600(&cert_path, &ct, WriteMode::CreateNew)?;
+        cert
+    };
+
+    let status = wire::cert_status(now, cert.not_after(), wire::DEVICE_RENEW_WINDOW.as_secs());
+    let cert = if status == CertStatus::Valid {
+        cert
+    } else {
+        let renewed = root.authorize_device(device.public(), now + lifetime)?;
+        let ct = encrypt(passphrase, &renewed.to_bytes())?;
+        write_file_0600(&cert_path, &ct, WriteMode::Replace)?;
+        renewed
+    };
+
+    Ok(DeviceCreds {
+        device,
+        root: root.public().clone(),
+        cert,
+        revocation: None,
+    })
+}
+
+/// The v3 dial ticket: `addr` plus our root and device PeerIds.
+pub(crate) fn ticket_for(addr: &TicketAddr, creds: &DeviceCreds) -> Result<String> {
+    encode_ticket(addr, &creds.root.peer_id().0, &creds.device.peer_id().0)
 }
 
 // ===========================================================================
@@ -227,12 +402,23 @@ fn write_file_0600(path: &Path, bytes: &[u8]) -> Result<()> {
 pub enum NodeEvent {
     /// Now accepting connections; `ticket` is the blob a peer dials (render as QR).
     Listening { ticket: String },
-    /// The accept loop was stopped (listen toggle off).
+    /// The accept loop was stopped (listen toggle off, or accepting failed).
     ListeningStopped,
-    /// A secure session was established with a peer (fresh handshake).
-    PeerConnected { peer_id_hex: String },
+    /// A secure, authenticated session is up (fresh or resumed). `peer_id_hex`
+    /// is the peer's DEVICE PeerId hex (the session key used by `send`);
+    /// `root_fingerprint` is the peer's ROOT fingerprint and `safety_number`
+    /// is derived from both roots (compare both out of band).
+    PeerConnected {
+        peer_id_hex: String,
+        root_fingerprint: String,
+        safety_number: String,
+    },
     /// A dropped session was resumed without re-handshaking (ratchet preserved).
-    Resumed { peer_id_hex: String },
+    Resumed {
+        peer_id_hex: String,
+        root_fingerprint: String,
+        safety_number: String,
+    },
     /// The dialer lost a peer and is retrying (with resume on success).
     Reconnecting { peer_id_hex: String },
     /// Live link health for a peer: whether the selected path is direct (vs
@@ -248,61 +434,82 @@ pub enum NodeEvent {
     PeerDisconnected { peer_id_hex: String },
     /// A non-fatal error worth surfacing in the diagnostics console.
     Error { message: String },
-    /// The peer failed authentication: an unsigned or forged handshake, a bad
-    /// resume proof, or an identity that doesn't match the ticket.
+    /// The peer failed authentication: a forged handshake, a bad resume proof,
+    /// a bad certificate chain, or an identity that doesn't match the ticket.
     AuthFailed { peer_id_hex: String, message: String },
+    /// Peer speaks another wire version ("the peer runs an incompatible Lattice version").
+    VersionMismatch { peer_id_hex: String, message: String },
+    /// The listener replied BUSY; the dialer retries with backoff.
+    PeerBusy { peer_id_hex: String },
+    /// connect() got a malformed or old-version ticket; nothing was dialed.
+    BadTicket { message: String },
 }
 
 /// A loaded Lattice node. Build with [`LatticeNode::load`], subscribe via
 /// [`next_event`](Self::next_event), then drive [`start_listening`](Self::start_listening)
 /// / [`connect`](Self::connect). The transport binds lazily on first use.
 pub struct LatticeNode {
-    me: Arc<Keypair>,
+    /// The ROOT identity (from the mnemonic): shown to the user, issues certs.
+    root: Keypair,
+    /// The DEVICE key + root-signed cert that sign handshakes.
+    creds: Arc<DeviceCreds>,
     transport: Arc<Mutex<Option<Arc<IrohTransport>>>>,
+    /// Live sessions by the peer's DEVICE PeerId.
     peers: Arc<Mutex<HashMap<PeerKey, mpsc::UnboundedSender<Vec<u8>>>>>,
     listen_task: Arc<Mutex<Option<AbortHandle>>>,
     /// The single active outbound dial loop (replaced on each `connect`).
     dial_task: Arc<Mutex<Option<AbortHandle>>>,
     /// Ratchet sessions kept across drops so a reconnecting peer can resume
-    /// without a fresh handshake (the listener side of resumption).
-    kept: Arc<Mutex<HashMap<PeerKey, SecureSession>>>,
+    /// without a fresh handshake (the listener side of resumption). Locked only
+    /// in synchronous sections.
+    kept: std::sync::Mutex<KeptSessions>,
+    /// Highest-seq verified revocation list per root (memory only), shared by
+    /// the listener and dialer paths.
+    cache: std::sync::Mutex<RevocationCache>,
+    /// Inbound negotiations + sessions that may run at once; beyond it, BUSY.
+    inbound: Arc<Semaphore>,
     events_tx: mpsc::UnboundedSender<NodeEvent>,
     events_rx: Mutex<Option<mpsc::UnboundedReceiver<NodeEvent>>>,
 }
 
 impl LatticeNode {
-    /// Decrypt the stored identity at `dir` with `passphrase` and build a node.
+    /// Decrypt the stored root identity at `dir` with `passphrase`, load (or
+    /// provision / renew) the device key and certificate, and build a node.
     /// No network yet — the transport binds on first `start_listening`/`connect`.
     pub fn load(dir: &str, passphrase: &str) -> Result<Arc<Self>> {
         validate_passphrase(passphrase)?;
         let mnemonic = load_mnemonic(dir, passphrase)?;
-        let me = Keypair::from_mnemonic(CryptoSuite::Hybrid, &mnemonic)?;
+        let root = Keypair::from_mnemonic(CryptoSuite::Hybrid, &mnemonic)?;
+        let creds = load_or_provision_device(dir, passphrase, &root, now_secs())?;
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         Ok(Arc::new(Self {
-            me: Arc::new(me),
+            root,
+            creds: Arc::new(creds),
             transport: Arc::new(Mutex::new(None)),
             peers: Arc::new(Mutex::new(HashMap::new())),
             listen_task: Arc::new(Mutex::new(None)),
             dial_task: Arc::new(Mutex::new(None)),
-            kept: Arc::new(Mutex::new(HashMap::new())),
+            kept: std::sync::Mutex::new(KeptSessions::new()),
+            cache: std::sync::Mutex::new(RevocationCache::new()),
+            inbound: Arc::new(Semaphore::new(wire::MAX_LIVE_INBOUND)),
             events_tx,
             events_rx: Mutex::new(Some(events_rx)),
         }))
     }
 
-    /// This node's stable PeerId, hex-encoded.
+    /// This node's stable ROOT PeerId, hex-encoded.
     pub fn peer_id_hex(&self) -> String {
-        peer_hex(&self.me)
+        peer_hex(&self.root)
     }
 
-    /// Short, comparable fingerprint of the PeerId.
+    /// The ROOT fingerprint (`PeerId::fingerprint()`, 10 groups of 4 hex).
     pub fn fingerprint(&self) -> String {
-        fingerprint(&self.me)
+        self.root.peer_id().fingerprint()
     }
 
-    /// The 24-word BIP39 backup mnemonic. Gate behind biometric + explicit intent.
+    /// The 24-word BIP39 ROOT backup mnemonic. Gate behind biometric + explicit intent.
     pub fn mnemonic(&self) -> String {
-        self.me.mnemonic().to_string()
+        self.root.mnemonic().to_string()
     }
 
     /// Pull the next event (drives the Dart-side stream). `None` once torn down.
@@ -325,17 +532,16 @@ impl LatticeNode {
         Ok(t)
     }
 
-    /// The dial ticket for this node (binds the transport if needed). Compact:
-    /// it carries only the iroh address + this node's 32-byte PeerId, not the
-    /// full PQ public-key bundle — small enough for a QR. The dialer fetches the
-    /// keys over the wire and verifies they hash to this PeerId.
+    /// The v3 dial ticket for this node (binds the transport if needed):
+    /// the iroh address plus our root and device PeerIds — small enough for a
+    /// QR. The dialer checks our hello (device identity + cert chain) against it.
     pub async fn my_ticket(&self) -> Result<String> {
         let t = self.ensure_online().await?;
-        t.ticket(&self.me.peer_id().0).await
+        ticket_for(&t.ticket_addr().await?, &self.creds)
     }
 
     /// Go online and start accepting inbound connections. Emits `Listening`
-    /// with the ticket, then runs an abortable accept loop.
+    /// with the ticket, then runs an abortable acceptor loop.
     pub fn start_listening(self: &Arc<Self>) {
         let node = Arc::clone(self);
         runtime().spawn(async move {
@@ -343,10 +549,12 @@ impl LatticeNode {
                 Ok(t) => t,
                 Err(e) => return node.emit_err(format!("go online: {e}")),
             };
-            match t.ticket(&node.me.peer_id().0).await {
-                Ok(ticket) => {
-                    let _ = node.events_tx.send(NodeEvent::Listening { ticket });
-                }
+            let ticket = match t.ticket_addr().await {
+                Ok(addr) => ticket_for(&addr, &node.creds),
+                Err(e) => Err(e),
+            };
+            match ticket {
+                Ok(ticket) => node.emit(NodeEvent::Listening { ticket }),
                 Err(e) => return node.emit_err(format!("ticket: {e}")),
             }
 
@@ -355,21 +563,7 @@ impl LatticeNode {
                 h.abort();
             }
             let n2 = Arc::clone(&node);
-            let handle = runtime().spawn(async move {
-                loop {
-                    match t.accept_conn().await {
-                        Ok(conn) => {
-                            let n3 = Arc::clone(&n2);
-                            runtime().spawn(async move { n3.handle_incoming(conn).await });
-                        }
-                        Err(e) => {
-                            let _ = n2
-                                .events_tx
-                                .send(NodeEvent::Error { message: format!("accept: {e}") });
-                        }
-                    }
-                }
-            });
+            let handle = runtime().spawn(async move { n2.accept_loop(t).await });
             *node.listen_task.lock().await = Some(handle.abort_handle());
         });
     }
@@ -382,14 +576,26 @@ impl LatticeNode {
             if let Some(h) = node.listen_task.lock().await.take() {
                 h.abort();
             }
-            let _ = node.events_tx.send(NodeEvent::ListeningStopped);
+            node.emit(NodeEvent::ListeningStopped);
         });
     }
 
     /// Dial a peer by ticket and keep the session alive across drops: on a
     /// disconnect it re-dials with resume (falling back to a fresh handshake if
     /// the peer can't resume), with exponential backoff while unreachable.
+    ///
+    /// The ticket is parsed first, synchronously: a malformed or old-version
+    /// ticket emits `BadTicket` and nothing else happens (no transport bind,
+    /// the existing dial loop is left alone).
     pub fn connect(self: &Arc<Self>, ticket: String) {
+        let parsed = match parse_ticket(&ticket) {
+            Ok(p) => p,
+            Err(e) => {
+                return self.emit(NodeEvent::BadTicket {
+                    message: err_text(&e),
+                })
+            }
+        };
         let node = Arc::clone(self);
         runtime().spawn(async move {
             // Replace any existing dial loop so repeated taps don't stack
@@ -398,12 +604,12 @@ impl LatticeNode {
                 h.abort();
             }
             let runner = Arc::clone(&node);
-            let handle = runtime().spawn(async move { runner.dial_loop(ticket).await });
+            let handle = runtime().spawn(async move { runner.dial_loop(ticket, parsed).await });
             *node.dial_task.lock().await = Some(handle.abort_handle());
         });
     }
 
-    /// Send a UTF-8 message to a connected peer (by hex PeerId).
+    /// Send a UTF-8 message to a connected peer (by its DEVICE PeerId hex).
     pub async fn send(&self, peer_id_hex: String, body: String) -> Result<()> {
         check_message_size(body.len())?;
         let key = decode_peer_key(&peer_id_hex)?;
@@ -416,108 +622,260 @@ impl LatticeNode {
         }
     }
 
-    // --- internals ---------------------------------------------------------
+    // --- internals: listener ----------------------------------------------
 
-    /// Responder: read the dialer's preamble, resume a kept session if asked and
-    /// available, else run a fresh handshake. Keeps the recovered session for a
-    /// future resume.
-    async fn handle_incoming(self: Arc<Self>, conn: IrohConn) {
-        // The dialer sends its preamble first — that's what completes accept_bi
-        // on our side (a QUIC bi-stream is only observed once the client sends).
-        let mut claimed: Option<PeerKey> = None;
-        let (peer, resumed, cs) =
-            match listener_establish(conn, self.me.as_ref(), &self.kept, &mut claimed).await {
-                Ok(x) => x,
+    /// Acceptor: take each incoming attempt, apply the source / global flood
+    /// limits and take a pending-accept slot before spawning anything.
+    async fn accept_loop(self: Arc<Self>, t: Arc<IrohTransport>) {
+        let pool = flood::SlotPool::new(wire::MAX_PENDING_ACCEPTS, wire::RESERVED_VERIFIED_SLOTS);
+        let guard: Arc<std::sync::Mutex<ListenGuard>> = Arc::new(std::sync::Mutex::new(
+            flood::FloodGuard::new(flood::MonotonicClock::new(), wire::listener_limits()),
+        ));
+        let busy = Arc::new(Semaphore::new(wire::MAX_BUSY_REPLIES));
+        loop {
+            let incoming = match t.accept_incoming().await {
+                Ok(i) => i,
                 Err(e) => {
-                    return match claimed {
-                        Some(k) => self.report_failure(hex::encode(k), "handshake", e),
-                        None => self.report_failure(String::new(), "preamble", e),
-                    };
+                    self.emit_err(format!("accept failed: {e} — no longer accepting"));
+                    self.emit(NodeEvent::ListeningStopped);
+                    break;
                 }
             };
-        let key = peer.peer_id().0;
-        if resumed {
-            let _ = self
-                .events_tx
-                .send(NodeEvent::Resumed { peer_id_hex: hex::encode(key) });
-        }
-
-        if let Some(recovered) = self.run_session(peer, cs).await {
-            self.kept.lock().await.insert(key, recovered);
+            let src = wire::source_key(incoming.remote_source());
+            let (node, guard_task, busy_task, t_task) = (
+                Arc::clone(&self),
+                Arc::clone(&guard),
+                Arc::clone(&busy),
+                Arc::clone(&t),
+            );
+            let events_tx = self.events_tx.clone();
+            // On refusal `incoming` (owned by the unused closure) is dropped,
+            // which refuses the attempt; the drop was already counted.
+            let _ = wire::spawn_admitted_with(
+                &guard,
+                &pool,
+                &src,
+                move |line| {
+                    let _ = events_tx.send(NodeEvent::Error { message: line });
+                },
+                move |slot| async move {
+                    node.accept_task(incoming, slot, src, guard_task, busy_task, t_task)
+                        .await
+                },
+            );
         }
     }
 
-    /// Dialer reconnect loop for one ticket. Returns never (runs until the node
-    /// is dropped); each iteration dials, runs the session, then re-dials.
-    async fn dial_loop(self: Arc<Self>, ticket: String) {
-        let mut kept: Option<SecureSession> = None;
-        let mut backoff = 1u64;
-        loop {
-            match self.dial_once(&ticket, &mut kept).await {
-                Ok(peer_hex) => {
-                    backoff = 1;
-                    let _ = self
-                        .events_tx
-                        .send(NodeEvent::Reconnecting { peer_id_hex: peer_hex });
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                }
-                // Auth failures were already surfaced as `AuthFailed`.
-                Err(Error::Verify(_)) => {
-                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
-                    backoff = (backoff * 2).min(30);
-                }
-                Err(e) => {
-                    self.emit_err(format!("connect: {e} — retrying in {backoff}s"));
-                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
-                    backoff = (backoff * 2).min(30);
-                }
+    /// One admitted inbound attempt: bounded `finish`, per-endpoint admission,
+    /// slot classification, then dispatch (negotiate, busy reply, or drop).
+    /// The pending-accept slot is held until this returns.
+    async fn accept_task(
+        self: Arc<Self>,
+        incoming: IncomingConn,
+        slot: flood::Slot,
+        src: SourceKey,
+        guard: Arc<std::sync::Mutex<ListenGuard>>,
+        busy: Arc<Semaphore>,
+        t: Arc<IrohTransport>,
+    ) {
+        let limit = match slot.kind() {
+            flood::SlotKind::General => wire::NEGOTIATION_TIMEOUT,
+            flood::SlotKind::Reserved => wire::PROVISIONAL_HANDSHAKE_TIMEOUT,
+        };
+        let conn = match wire::accept_within(limit, incoming.finish()).await {
+            Ok(c) => c,
+            Err(_) => {
+                lock(&guard).record_failure(&src, None);
+                self.note_drop(&guard, flood::DropReason::Failed);
+                return;
             }
-        }
-    }
-
-    /// One dial: negotiate resume-vs-fresh, run the session, stash the recovered
-    /// ratchet into `kept` for the next attempt. Returns the peer's hex id.
-    async fn dial_once(&self, ticket: &str, kept: &mut Option<SecureSession>) -> Result<String> {
-        let mut ticket_id: Option<Vec<u8>> = None;
-        match self.dial_inner(ticket, kept, &mut ticket_id).await {
-            Err(Error::Verify(msg)) => {
-                // Surface auth failures distinctly; the dial loop retries quietly.
-                let peer_id_hex = ticket_id.map(hex::encode).unwrap_or_default();
-                let _ = self.events_tx.send(NodeEvent::AuthFailed {
-                    peer_id_hex,
-                    message: msg.clone(),
+        };
+        let ep = conn.remote_endpoint_id();
+        let admitted = lock(&guard).admit_endpoint(&ep);
+        let verified = match admitted {
+            Ok(v) => v,
+            Err(reason) => return self.note_drop(&guard, reason),
+        };
+        let Some(_slot) = slot.classify(verified) else {
+            return self.note_drop(&guard, flood::DropReason::StrangerInReservedSlot);
+        };
+        match Arc::clone(&self.inbound).try_acquire_owned() {
+            Ok(permit) => {
+                let node = Arc::clone(&self);
+                tokio::spawn(async move {
+                    let _permit = permit; // held until the session ends
+                    node.handle_incoming(conn, src, ep, guard, t).await;
                 });
-                Err(Error::Verify(msg))
             }
-            other => other,
+            Err(_) => {
+                // No room: a bounded one-byte busy reply, else drop `conn`.
+                let _ = wire::spawn_bounded(&busy, async move {
+                    let _ =
+                        tokio::time::timeout(wire::NEGOTIATION_TIMEOUT, wire::reply_busy(conn))
+                            .await;
+                });
+            }
         }
     }
 
-    async fn dial_inner(
+    /// Responder: negotiate (resume or fresh + auth exchange), run the
+    /// session, and keep the recovered ratchet for a future resume.
+    async fn handle_incoming(
+        self: Arc<Self>,
+        conn: IrohConn,
+        src: SourceKey,
+        ep: [u8; 32],
+        guard: Arc<std::sync::Mutex<ListenGuard>>,
+        t: Arc<IrohTransport>,
+    ) {
+        let binding = channel_binding(&conn.remote_endpoint_id(), &t.endpoint_id_bytes());
+        let mut claimed: Option<PeerId> = None;
+        let mut resumed = false;
+        let res = wire::negotiate_accept_tracked(
+            conn,
+            &self.creds,
+            &self.kept,
+            &binding,
+            now_secs(),
+            &self.cache,
+            &mut claimed,
+            wire::NEGOTIATION_TIMEOUT,
+            &mut resumed,
+        )
+        .await;
+        let (auth, cs) = match res {
+            Ok(x) => x,
+            Err(e) => {
+                lock(&guard).record_failure(&src, Some(&ep));
+                let peer_id_hex = claimed.map(|p| hex::encode(p.0)).unwrap_or_default();
+                return match classify_failure(&e) {
+                    FailureKind::Version => self.emit(NodeEvent::VersionMismatch {
+                        peer_id_hex,
+                        message: err_text(&e),
+                    }),
+                    FailureKind::Auth => self.emit(NodeEvent::AuthFailed {
+                        peer_id_hex,
+                        message: err_text(&e),
+                    }),
+                    _ => self.emit_err(format!("negotiation: {e}")),
+                };
+            }
+        };
+        // Only our own root counts as "verified" for slot reservation.
+        let own_root = self.root.peer_id();
+        let verified_root = (auth.root.peer_id() == own_root).then_some(own_root);
+        lock(&guard).record_success(&src, &ep, verified_root);
+
+        if resumed {
+            let (root_fingerprint, safety_number) = self.trust_of(&auth);
+            self.emit(NodeEvent::Resumed {
+                peer_id_hex: hex::encode(auth.device.peer_id().0),
+                root_fingerprint,
+                safety_number,
+            });
+        }
+        if let Some(session) = self.run_session(&auth, cs).await {
+            // Keep for a future resume (least recently used are evicted).
+            let _evicted = lock(&self.kept).insert(auth.device.peer_id(), KeptPeer { session, auth });
+        }
+    }
+
+    // --- internals: dialer -------------------------------------------------
+
+    /// Dialer reconnect loop for one ticket. Runs until aborted (a new
+    /// `connect`) or a wire-version mismatch; each iteration dials, runs the
+    /// session, then re-dials.
+    async fn dial_loop(self: Arc<Self>, ticket: String, parsed: ParsedTicket) {
+        let mut kept: Option<KeptPeer> = None;
+        let mut backoff = 1u64;
+        let ticket_device_hex = hex::encode(parsed.device_id);
+        loop {
+            match self.dial_once(&ticket, &parsed, &mut kept).await {
+                Ok(peer_id_hex) => {
+                    backoff = 1;
+                    self.emit(NodeEvent::Reconnecting { peer_id_hex });
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(e) => match classify_failure(&e) {
+                    FailureKind::Version => {
+                        // The peer runs an incompatible version: retrying won't help.
+                        return self.emit(NodeEvent::VersionMismatch {
+                            peer_id_hex: ticket_device_hex,
+                            message: err_text(&e),
+                        });
+                    }
+                    FailureKind::Busy => self.emit(NodeEvent::PeerBusy {
+                        peer_id_hex: ticket_device_hex.clone(),
+                    }),
+                    FailureKind::Auth => self.emit(NodeEvent::AuthFailed {
+                        peer_id_hex: ticket_device_hex.clone(),
+                        message: err_text(&e),
+                    }),
+                    FailureKind::Other => {
+                        self.emit_err(format!("connect: {e} — retrying in {backoff}s"))
+                    }
+                },
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+            backoff = (backoff * 2).min(30);
+        }
+    }
+
+    /// One dial: connect, check the endpoint, negotiate (resume or fresh), run
+    /// the session, stash the recovered ratchet into `kept` for the next
+    /// attempt. Returns the peer's device hex id.
+    async fn dial_once(
         &self,
         ticket: &str,
-        kept: &mut Option<SecureSession>,
-        ticket_id: &mut Option<Vec<u8>>,
+        parsed: &ParsedTicket,
+        kept: &mut Option<KeptPeer>,
     ) -> Result<String> {
         let t = self.ensure_online().await?;
-        // The ticket carries the peer's 32-byte PeerId (the trust anchor).
-        let (expected_peer_id, conn) = t.connect_ticket(ticket).await?;
-        *ticket_id = Some(expected_peer_id.to_vec());
-
-        // dialer_negotiate sends our preamble FIRST to open the QUIC bi-stream
-        // (the listener's accept only completes once the client sends), then
-        // verifies the listener's decision against the ticket PeerId.
-        let (peer, resumed, cs) =
-            dialer_establish(conn, self.me.as_ref(), expected_peer_id.as_slice(), kept).await?;
-        let hex = hex::encode(peer.peer_id().0);
-        if resumed {
-            let _ = self
-                .events_tx
-                .send(NodeEvent::Resumed { peer_id_hex: hex.clone() });
+        let (dialed, conn) = t.connect_ticket(ticket).await?;
+        // The ticket we dialed must be the one we parsed, and we must have
+        // reached the endpoint it names.
+        if dialed != *parsed {
+            return Err(Error::Verify("ticket changed".into()));
         }
+        check_endpoint(&parsed.endpoint_id, &conn.remote_endpoint_id())?;
+        let binding = channel_binding(&t.endpoint_id_bytes(), &conn.remote_endpoint_id());
+        let mut resumed = false;
+        let (auth, cs) = wire::negotiate_dial_within_tracked(
+            conn,
+            &self.creds,
+            &parsed.root_id,
+            &parsed.device_id,
+            kept,
+            &binding,
+            now_secs(),
+            &self.cache,
+            wire::NEGOTIATION_TIMEOUT,
+            &mut resumed,
+        )
+        .await?;
+        let peer_id_hex = hex::encode(auth.device.peer_id().0);
+        if resumed {
+            let (root_fingerprint, safety_number) = self.trust_of(&auth);
+            self.emit(NodeEvent::Resumed {
+                peer_id_hex: peer_id_hex.clone(),
+                root_fingerprint,
+                safety_number,
+            });
+        }
+        let recovered = self.run_session(&auth, cs).await;
+        *kept = recovered.map(|session| KeptPeer { session, auth });
+        Ok(peer_id_hex)
+    }
 
-        *kept = self.run_session(peer, cs).await;
-        Ok(hex)
+    // --- internals: session ------------------------------------------------
+
+    /// The peer's root fingerprint and the safety number of both roots.
+    fn trust_of(&self, auth: &PeerAuth) -> (String, String) {
+        (
+            auth.root.peer_id().fingerprint(),
+            safety_number(&self.creds.root, &auth.root),
+        )
     }
 
     /// Full-duplex pump over one session: a reader task decrypts inbound frames
@@ -527,17 +885,20 @@ impl LatticeNode {
     /// intact) so the caller can resume it on the next connection.
     async fn run_session(
         &self,
-        peer: PublicIdentity,
+        auth: &PeerAuth,
         cs: ConnectedSession<IrohConn>,
     ) -> Option<SecureSession> {
-        let key = peer.peer_id().0;
+        let key = auth.device.peer_id().0;
         let hex = hex::encode(key);
 
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         self.peers.lock().await.insert(key, out_tx);
-        let _ = self
-            .events_tx
-            .send(NodeEvent::PeerConnected { peer_id_hex: hex.clone() });
+        let (root_fingerprint, safety_number) = self.trust_of(auth);
+        self.emit(NodeEvent::PeerConnected {
+            peer_id_hex: hex.clone(),
+            root_fingerprint,
+            safety_number,
+        });
 
         let (conn, secure) = cs.into_parts();
         let link_handle = conn.handle();
@@ -569,7 +930,8 @@ impl LatticeNode {
             let hex = hex.clone();
             runtime().spawn(async move {
                 while let Ok(frame) = read_frame(&mut recv).await {
-                    match secure.lock().await.open(&frame) {
+                    let opened = secure.lock().await.open(&frame);
+                    match opened {
                         Ok(pt) => {
                             let _ = events_tx.send(NodeEvent::Message {
                                 peer_id_hex: hex.clone(),
@@ -591,7 +953,8 @@ impl LatticeNode {
             tokio::select! {
                 maybe = out_rx.recv() => match maybe {
                     Some(bytes) => {
-                        let frame = match secure.lock().await.seal(&bytes) {
+                        let sealed = secure.lock().await.seal(&bytes);
+                        let frame = match sealed {
                             Ok(f) => f,
                             Err(e) => { self.emit_err(format!("encrypt: {e}")); break; }
                         };
@@ -610,28 +973,34 @@ impl LatticeNode {
         let _ = reader.await;
         let _ = poller.await;
         self.peers.lock().await.remove(&key);
-        let _ = self
-            .events_tx
-            .send(NodeEvent::PeerDisconnected { peer_id_hex: hex });
+        self.emit(NodeEvent::PeerDisconnected { peer_id_hex: hex });
         // Reclaim sole ownership of the ratchet so a reconnect can resume it.
         Arc::try_unwrap(secure).ok().map(|m| m.into_inner())
     }
 
-    fn emit_err(&self, message: String) {
-        let _ = self.events_tx.send(NodeEvent::Error { message });
+    fn emit(&self, e: NodeEvent) {
+        let _ = self.events_tx.send(e);
     }
 
-    /// Surface a failed inbound connection: `Error::Verify` becomes the distinct
-    /// `AuthFailed` event, anything else keeps the generic `Error` text.
-    fn report_failure(&self, peer_id_hex: String, what: &str, e: Error) {
-        match e {
-            Error::Verify(message) => {
-                let _ = self
-                    .events_tx
-                    .send(NodeEvent::AuthFailed { peer_id_hex, message });
-            }
-            e => self.emit_err(format!("{what}: {e}")),
+    fn emit_err(&self, message: String) {
+        self.emit(NodeEvent::Error { message });
+    }
+
+    /// Count a dropped inbound attempt; surface the aggregated summary line
+    /// (at most one per `DROP_WARN_INTERVAL`) as an `Error` event.
+    fn note_drop(&self, guard: &std::sync::Mutex<ListenGuard>, reason: flood::DropReason) {
+        if let Some(line) = wire::note_drop(guard, reason) {
+            self.emit_err(line);
         }
+    }
+}
+
+/// The user-facing text of an error: the inner message for verification and
+/// transport errors (no "verification failed:" prefix), else its display.
+fn err_text(e: &Error) -> String {
+    match e {
+        Error::Verify(m) | Error::Transport(m) | Error::Other(m) => m.clone(),
+        e => e.to_string(),
     }
 }
 
@@ -644,266 +1013,6 @@ fn decode_peer_key(peer_id_hex: &str) -> Result<PeerKey> {
         .map_err(|_| Error::Other("peer id must be 32 bytes".into()))
 }
 
-// ===========================================================================
-// Connection preamble, resume challenge, establish (generic over FrameIo)
-// ===========================================================================
-
-/// Frame-level duplex used by the preamble/challenge code. Implemented for
-/// [`IrohConn`] and, in tests, for an in-memory adapter.
-pub(crate) trait FrameIo: Send {
-    fn send_frame(&mut self, bytes: &[u8]) -> impl Future<Output = Result<()>> + Send;
-    fn recv_frame(&mut self) -> impl Future<Output = Result<Vec<u8>>> + Send;
-}
-
-impl FrameIo for IrohConn {
-    fn send_frame(&mut self, bytes: &[u8]) -> impl Future<Output = Result<()>> + Send {
-        async move { self.send(bytes).await }
-    }
-    fn recv_frame(&mut self) -> impl Future<Output = Result<Vec<u8>>> + Send {
-        async move { self.recv().await }
-    }
-}
-
-/// Parsed dialer preamble: `[mode] || dialer_nonce[32] || identity`.
-pub(crate) struct Preamble {
-    pub mode: u8,
-    pub nonce: [u8; 32],
-    pub peer: PublicIdentity,
-}
-
-pub(crate) fn encode_preamble(mode: u8, nonce: &[u8; 32], me: &PublicIdentity) -> Vec<u8> {
-    let mut v = Vec::with_capacity(MIN_PREAMBLE_LEN + 64);
-    v.push(mode);
-    v.extend_from_slice(nonce);
-    v.extend_from_slice(&me.to_bytes());
-    v
-}
-
-pub(crate) fn parse_preamble(bytes: &[u8]) -> Result<Preamble> {
-    if bytes.len() < MIN_PREAMBLE_LEN {
-        return Err(Error::Other("short preamble".into()));
-    }
-    let mut nonce = [0u8; 32];
-    nonce.copy_from_slice(&bytes[1..MIN_PREAMBLE_LEN]);
-    let peer = PublicIdentity::from_bytes(&bytes[MIN_PREAMBLE_LEN..])
-        .map_err(|e| Error::Other(format!("bad peer identity: {e}")))?;
-    Ok(Preamble { mode: bytes[0], nonce, peer })
-}
-
-pub(crate) enum ListenerOutcome {
-    /// Run a fresh `ConnectedSession::accept`. Nothing has been removed from `kept`.
-    Fresh { peer: PublicIdentity },
-    /// Proof verified. The session has already been removed from `kept`.
-    Resume { peer: PublicIdentity, session: SecureSession },
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) async fn listener_negotiate<C: FrameIo>(
-    io: &mut C,
-    me: &Keypair,
-    kept: &Mutex<HashMap<PeerKey, SecureSession>>,
-) -> Result<ListenerOutcome> {
-    listener_negotiate_claimed(io, me, kept, &mut None).await
-}
-
-/// As [`listener_negotiate`], also reporting the PeerId the dialer claimed (once
-/// its preamble parsed) so callers can attribute failures.
-async fn listener_negotiate_claimed<C: FrameIo>(
-    io: &mut C,
-    me: &Keypair,
-    kept: &Mutex<HashMap<PeerKey, SecureSession>>,
-    claimed: &mut Option<PeerKey>,
-) -> Result<ListenerOutcome> {
-    let bytes = io.recv_frame().await?;
-    let pre = parse_preamble(&bytes)?;
-    let key = pre.peer.peer_id().0;
-    *claimed = Some(key);
-    let my_pub = me.public();
-
-    if pre.mode == MODE_RESUME {
-        let listener_nonce = resume_nonce()?;
-        // Short lock: compute our tag, never hold it across network I/O.
-        let listener_tag = {
-            let g = kept.lock().await;
-            g.get(&key).map(|s| {
-                s.resume_tag(
-                    ResumeRole::Listener,
-                    &pre.peer,
-                    &my_pub,
-                    &pre.nonce,
-                    &listener_nonce,
-                )
-            })
-        };
-        if let Some(listener_tag) = listener_tag {
-            let mut reply = Vec::with_capacity(1 + NONCE_LEN + TAG_LEN + 64);
-            reply.push(DECISION_CHALLENGE);
-            reply.extend_from_slice(&listener_nonce);
-            reply.extend_from_slice(&listener_tag);
-            reply.extend_from_slice(&me.public().to_bytes());
-            io.send_frame(&reply).await?;
-
-            let tag = tokio::time::timeout(RESUME_TAG_TIMEOUT, io.recv_frame())
-                .await
-                .map_err(|_| Error::Other("timed out waiting for resume proof".into()))??;
-            if tag.len() != TAG_LEN {
-                return Err(Error::Other("malformed resume proof".into()));
-            }
-
-            // Verify + remove under one lock scope, with no await in between.
-            let mut g = kept.lock().await;
-            let sess = g
-                .get(&key)
-                .ok_or_else(|| Error::Other("kept session was taken by another connection".into()))?;
-            sess.verify_resume_tag(
-                ResumeRole::Dialer,
-                &pre.peer,
-                &my_pub,
-                &pre.nonce,
-                &listener_nonce,
-                &tag,
-            )?;
-            let session = g
-                .remove(&key)
-                .ok_or_else(|| Error::Other("kept session vanished".into()))?;
-            return Ok(ListenerOutcome::Resume { peer: pre.peer, session });
-        }
-    }
-
-    // Fresh path: reply with our identity; the signed handshake follows.
-    let mut reply = vec![DECISION_FRESH];
-    reply.extend_from_slice(&me.public().to_bytes());
-    io.send_frame(&reply).await?;
-    Ok(ListenerOutcome::Fresh { peer: pre.peer })
-}
-
-pub(crate) enum DialerOutcome {
-    /// The listener chose fresh. The caller runs `ConnectedSession::initiate`.
-    Fresh { peer: PublicIdentity },
-    /// Both proofs verified. The session has been taken out of the dialer's `kept`.
-    Resume { peer: PublicIdentity, session: SecureSession },
-}
-
-/// Dialer side: send the preamble (opens the QUIC stream), then handle the
-/// listener's decision. `expected_peer_id` is the PeerId from the ticket.
-pub(crate) async fn dialer_negotiate<C: FrameIo>(
-    io: &mut C,
-    me: &Keypair,
-    expected_peer_id: &[u8],
-    kept: &mut Option<SecureSession>,
-) -> Result<DialerOutcome> {
-    let (mode, dialer_nonce) = if kept.is_some() {
-        (MODE_RESUME, resume_nonce()?)
-    } else {
-        (MODE_FRESH, [0u8; NONCE_LEN])
-    };
-    io.send_frame(&encode_preamble(mode, &dialer_nonce, &me.public())).await?;
-
-    let reply = io.recv_frame().await?;
-    if reply.is_empty() {
-        return Err(Error::Verify("empty reply from peer".into()));
-    }
-    let mismatch = || Error::Verify("peer identity does not match the ticket fingerprint".into());
-
-    match reply[0] {
-        DECISION_FRESH => {
-            let peer = PublicIdentity::from_bytes(&reply[1..])?;
-            if peer.peer_id().0.as_slice() != expected_peer_id {
-                return Err(mismatch());
-            }
-            *kept = None; // peer chose fresh — drop the stale session
-            Ok(DialerOutcome::Fresh { peer })
-        }
-        DECISION_CHALLENGE => {
-            const HDR: usize = 1 + NONCE_LEN + TAG_LEN;
-            if reply.len() < HDR + 1 {
-                return Err(Error::Other("short resume challenge".into()));
-            }
-            let sess = kept
-                .as_ref()
-                .ok_or_else(|| Error::Other("resume challenge without a kept session".into()))?;
-            let mut listener_nonce = [0u8; NONCE_LEN];
-            listener_nonce.copy_from_slice(&reply[1..1 + NONCE_LEN]);
-            let listener_tag = &reply[1 + NONCE_LEN..HDR];
-            let peer = PublicIdentity::from_bytes(&reply[HDR..])?;
-            if peer.peer_id().0.as_slice() != expected_peer_id {
-                return Err(mismatch());
-            }
-            let my_pub = me.public();
-            sess.verify_resume_tag(
-                ResumeRole::Listener,
-                &my_pub,
-                &peer,
-                &dialer_nonce,
-                &listener_nonce,
-                listener_tag,
-            )?;
-            let tag = sess.resume_tag(
-                ResumeRole::Dialer,
-                &my_pub,
-                &peer,
-                &dialer_nonce,
-                &listener_nonce,
-            );
-            io.send_frame(&tag).await?;
-            let session = kept
-                .take()
-                .ok_or_else(|| Error::Other("kept session vanished".into()))?;
-            Ok(DialerOutcome::Resume { peer, session })
-        }
-        DECISION_RESUMED => Err(Error::Other(
-            "peer uses the retired resume protocol; upgrade the peer".into(),
-        )),
-        other => Err(Error::Other(format!("unknown decision byte {other}"))),
-    }
-}
-
-/// Listener: negotiate, then accept/resume, with the `kept` bookkeeping. The
-/// stale kept session is only removed once a fresh `accept` succeeds, so a
-/// forged handshake cannot destroy a peer's resumable session. Returns
-/// `(peer, resumed, session)`.
-pub(crate) async fn listener_establish<C>(
-    mut conn: C,
-    me: &Keypair,
-    kept: &Mutex<HashMap<PeerKey, SecureSession>>,
-    claimed: &mut Option<PeerKey>,
-) -> Result<(PublicIdentity, bool, ConnectedSession<C>)>
-where
-    C: FrameIo + Connection,
-{
-    match listener_negotiate_claimed(&mut conn, me, kept, claimed).await? {
-        ListenerOutcome::Resume { peer, session } => {
-            Ok((peer, true, ConnectedSession::resume(conn, session)))
-        }
-        ListenerOutcome::Fresh { peer } => {
-            let cs = ConnectedSession::accept(conn, me, &peer).await?;
-            kept.lock().await.remove(&peer.peer_id().0);
-            Ok((peer, false, cs))
-        }
-    }
-}
-
-/// Dialer counterpart of [`listener_establish`].
-pub(crate) async fn dialer_establish<C>(
-    mut conn: C,
-    me: &Keypair,
-    expected_peer_id: &[u8],
-    kept: &mut Option<SecureSession>,
-) -> Result<(PublicIdentity, bool, ConnectedSession<C>)>
-where
-    C: FrameIo + Connection,
-{
-    match dialer_negotiate(&mut conn, me, expected_peer_id, kept).await? {
-        DialerOutcome::Resume { peer, session } => {
-            Ok((peer, true, ConnectedSession::resume(conn, session)))
-        }
-        DialerOutcome::Fresh { peer } => {
-            let cs = ConnectedSession::initiate(conn, me, &peer).await?;
-            Ok((peer, false, cs))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -913,6 +1022,10 @@ mod tests {
             .join(format!("lattice-m2-{tag}-{}", std::process::id()))
             .to_string_lossy()
             .into_owned()
+    }
+
+    fn kp() -> Keypair {
+        Keypair::generate(CryptoSuite::Hybrid).expect("keygen")
     }
 
     #[test]
@@ -955,352 +1068,6 @@ mod tests {
         assert!(decode_peer_key("zz").is_err()); // not hex
         assert!(decode_peer_key("abcd").is_err()); // wrong length
         assert!(decode_peer_key("").is_err());
-    }
-
-    // --- in-memory transport -------------------------------------------------
-
-    /// Length-prefixed (u32 BE) frames over a tokio duplex.
-    struct MemConn {
-        io: tokio::io::DuplexStream,
-    }
-
-    fn mem_pair() -> (MemConn, MemConn) {
-        let (a, b) = tokio::io::duplex(1 << 20);
-        (MemConn { io: a }, MemConn { io: b })
-    }
-
-    fn io_err(e: std::io::Error) -> Error {
-        Error::Other(format!("mem io: {e}"))
-    }
-
-    impl MemConn {
-        async fn write_msg(&mut self, bytes: &[u8]) -> Result<()> {
-            use tokio::io::AsyncWriteExt;
-            self.io
-                .write_all(&(bytes.len() as u32).to_be_bytes())
-                .await
-                .map_err(io_err)?;
-            self.io.write_all(bytes).await.map_err(io_err)?;
-            self.io.flush().await.map_err(io_err)
-        }
-
-        async fn read_msg(&mut self) -> Result<Vec<u8>> {
-            use tokio::io::AsyncReadExt;
-            let mut len = [0u8; 4];
-            self.io.read_exact(&mut len).await.map_err(io_err)?;
-            let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
-            self.io.read_exact(&mut buf).await.map_err(io_err)?;
-            Ok(buf)
-        }
-    }
-
-    impl FrameIo for MemConn {
-        fn send_frame(&mut self, bytes: &[u8]) -> impl Future<Output = Result<()>> + Send {
-            self.write_msg(bytes)
-        }
-        fn recv_frame(&mut self) -> impl Future<Output = Result<Vec<u8>>> + Send {
-            self.read_msg()
-        }
-    }
-
-    // What `ConnectedSession<C>` needs from a connection.
-    impl Connection for MemConn {
-        async fn send(&mut self, bytes: &[u8]) -> Result<()> {
-            self.write_msg(bytes).await
-        }
-        async fn recv(&mut self) -> Result<Vec<u8>> {
-            self.read_msg().await
-        }
-    }
-
-    type Kept = Mutex<HashMap<PeerKey, SecureSession>>;
-
-    fn kp() -> Keypair {
-        Keypair::generate(CryptoSuite::Hybrid).expect("keygen")
-    }
-
-    fn pid(k: &Keypair) -> PeerKey {
-        k.peer_id().0
-    }
-
-    /// A real fresh handshake: `a` dials `b`. Returns (a's session, b's session).
-    async fn session_pair(a: &Keypair, b: &Keypair) -> (SecureSession, SecureSession) {
-        let (ca, cb) = mem_pair();
-        let mut kept_a = None;
-        let kept_b: Kept = Mutex::new(HashMap::new());
-        let mut claimed = None;
-        let bid = pid(b);
-        let (ra, rb) = tokio::join!(
-            dialer_establish(ca, a, &bid, &mut kept_a),
-            listener_establish(cb, b, &kept_b, &mut claimed)
-        );
-        let csa = ra.expect("dialer handshake").2;
-        let csb = rb.expect("listener handshake").2;
-        (csa.into_parts().1, csb.into_parts().1)
-    }
-
-    async fn kept_with(a: &Keypair, sess: SecureSession) -> Kept {
-        let mut m = HashMap::new();
-        m.insert(pid(a), sess);
-        Mutex::new(m)
-    }
-
-    async fn assert_kept_has(kept: &Kept, a: &Keypair) {
-        let g = kept.lock().await;
-        assert_eq!(g.len(), 1);
-        assert!(g.contains_key(&pid(a)));
-    }
-
-    /// Impostor/fake-peer preamble claiming `claim`'s identity.
-    fn resume_preamble(claim: &Keypair, nonce: [u8; 32]) -> Vec<u8> {
-        encode_preamble(MODE_RESUME, &nonce, &claim.public())
-    }
-
-    // --- listener ------------------------------------------------------------
-
-    #[tokio::test]
-    async fn forged_initiator_leaves_kept_unchanged() {
-        let (alice, bob, eve) = (kp(), kp(), kp());
-        let (_sa, sb) = session_pair(&alice, &bob).await;
-        let kept = kept_with(&alice, sb).await;
-
-        let (mut ce, cb) = mem_pair();
-        let mut claimed = None;
-        let bob_pub = bob.public();
-        let eve_side = async {
-            // Eve claims Alice's identity but signs with her own key.
-            ce.write_msg(&encode_preamble(MODE_FRESH, &[0u8; 32], &alice.public()))
-                .await
-                .expect("preamble");
-            ce.read_msg().await.expect("decision");
-            let _ = ConnectedSession::initiate(ce, &eve, &bob_pub).await;
-        };
-        let (res, _) = tokio::join!(listener_establish(cb, &bob, &kept, &mut claimed), eve_side);
-        assert!(matches!(res, Err(Error::Verify(_))), "forged handshake must be Verify");
-        assert_kept_has(&kept, &alice).await;
-    }
-
-    #[tokio::test]
-    async fn fresh_accept_ok_removes_stale_kept() {
-        let (alice, bob) = (kp(), kp());
-        let (_sa, stale_b) = session_pair(&alice, &bob).await;
-        let kept = kept_with(&alice, stale_b).await;
-
-        let (ca, cb) = mem_pair();
-        let mut kept_a = None;
-        let mut claimed = None;
-        let bid = pid(&bob);
-        let (ra, rb) = tokio::join!(
-            dialer_establish(ca, &alice, &bid, &mut kept_a),
-            listener_establish(cb, &bob, &kept, &mut claimed)
-        );
-        assert!(ra.is_ok() && rb.is_ok());
-        assert!(kept.lock().await.is_empty(), "stale entry removed after accept");
-    }
-
-    #[tokio::test]
-    async fn impostor_bogus_tag_rejected() {
-        let (alice, bob) = (kp(), kp());
-        let (_sa, sb) = session_pair(&alice, &bob).await;
-        let kept = kept_with(&alice, sb).await;
-
-        let (mut ci, mut cb) = mem_pair();
-        let imp = async {
-            ci.write_msg(&resume_preamble(&alice, [7u8; 32])).await.unwrap();
-            let challenge = ci.read_msg().await.unwrap();
-            assert_eq!(challenge[0], DECISION_CHALLENGE);
-            ci.write_msg(&[0u8; TAG_LEN]).await.unwrap();
-        };
-        let (res, _) = tokio::join!(listener_negotiate(&mut cb, &bob, &kept), imp);
-        assert!(matches!(res, Err(Error::Verify(_))));
-        assert_kept_has(&kept, &alice).await;
-    }
-
-    #[tokio::test]
-    async fn impostor_hangup_mid_challenge() {
-        let (alice, bob) = (kp(), kp());
-        let (_sa, sb) = session_pair(&alice, &bob).await;
-        let kept = kept_with(&alice, sb).await;
-
-        let (ci, mut cb) = mem_pair();
-        let preamble = resume_preamble(&alice, [9u8; 32]);
-        let imp = async move {
-            let mut ci = ci;
-            ci.write_msg(&preamble).await.unwrap();
-            let _ = ci.read_msg().await.unwrap();
-            // `ci` dropped here: hang up
-        };
-        let (res, _) = tokio::join!(listener_negotiate(&mut cb, &bob, &kept), imp);
-        assert!(res.is_err());
-        assert_kept_has(&kept, &alice).await;
-    }
-
-    #[tokio::test]
-    async fn legacy_preamble_rejected() {
-        let (alice, bob) = (kp(), kp());
-        let (_sa, sb) = session_pair(&alice, &bob).await;
-        let kept = kept_with(&alice, sb).await;
-
-        let (mut ci, cb) = mem_pair();
-        // Legacy shape: [mode] || identity, no nonce.
-        let mut legacy = vec![MODE_RESUME];
-        legacy.extend_from_slice(&alice.public().to_bytes());
-        ci.write_msg(&legacy).await.unwrap();
-
-        let res = async move {
-            let mut cb = cb;
-            listener_negotiate(&mut cb, &bob, &kept).await.map(|_| ()).map_err(|e| (e, kept))
-        }
-        .await;
-        let (_, kept) = res.expect_err("legacy preamble must fail");
-        assert_kept_has(&kept, &alice).await;
-        // The listener's end is gone and nothing (no DECISION_FRESH) was written.
-        assert!(ci.read_msg().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn short_preamble_rejected() {
-        let (alice, bob) = (kp(), kp());
-        let (_sa, sb) = session_pair(&alice, &bob).await;
-        let kept = kept_with(&alice, sb).await;
-        for n in [0usize, 1, 32] {
-            let (mut ci, mut cb) = mem_pair();
-            ci.write_msg(&vec![MODE_RESUME; n]).await.unwrap();
-            assert!(listener_negotiate(&mut cb, &bob, &kept).await.is_err(), "len {n}");
-            assert!(parse_preamble(&vec![MODE_RESUME; n]).is_err(), "len {n}");
-        }
-        assert_kept_has(&kept, &alice).await;
-    }
-
-    #[tokio::test]
-    async fn fresh_mode_with_kept_session_goes_fresh() {
-        let (alice, bob) = (kp(), kp());
-        let (_sa, sb) = session_pair(&alice, &bob).await;
-        let kept = kept_with(&alice, sb).await;
-
-        let (mut ca, mut cb) = mem_pair();
-        let mut no_kept = None;
-        let bid = pid(&bob);
-        let (rl, rd) = tokio::join!(
-            listener_negotiate(&mut cb, &bob, &kept),
-            dialer_negotiate(&mut ca, &alice, &bid, &mut no_kept)
-        );
-        assert!(matches!(rl, Ok(ListenerOutcome::Fresh { .. })));
-        assert!(matches!(rd, Ok(DialerOutcome::Fresh { .. })));
-        assert_kept_has(&kept, &alice).await;
-    }
-
-    // --- dialer --------------------------------------------------------------
-
-    /// Fake listener: read the dialer's preamble, answer with `challenge(dialer_nonce)`.
-    async fn fake_listener(
-        cb: &mut MemConn,
-        challenge: impl FnOnce([u8; 32]) -> Vec<u8>,
-    ) {
-        let pre = parse_preamble(&cb.read_msg().await.unwrap()).unwrap();
-        cb.write_msg(&challenge(pre.nonce)).await.unwrap();
-    }
-
-    fn challenge_bytes(ln: &[u8; 32], tag: &[u8], ident: &PublicIdentity) -> Vec<u8> {
-        let mut v = vec![DECISION_CHALLENGE];
-        v.extend_from_slice(ln);
-        v.extend_from_slice(tag);
-        v.extend_from_slice(&ident.to_bytes());
-        v
-    }
-
-    #[tokio::test]
-    async fn wrong_listener_tag_rejected() {
-        let (alice, bob) = (kp(), kp());
-        let (sa, sb) = session_pair(&alice, &bob).await;
-        let mut kept_a = Some(sa);
-        let (mut ca, mut cb) = mem_pair();
-        let (a_pub, b_pub) = (alice.public(), bob.public());
-        let ln = [5u8; 32];
-        let fake = fake_listener(&mut cb, |dn| {
-            let mut tag = sb.resume_tag(ResumeRole::Listener, &a_pub, &b_pub, &dn, &ln).to_vec();
-            tag[0] ^= 0xff;
-            challenge_bytes(&ln, &tag, &bob.public())
-        });
-        let bid = pid(&bob);
-        let (res, _) = tokio::join!(dialer_negotiate(&mut ca, &alice, &bid, &mut kept_a), fake);
-        assert!(matches!(res, Err(Error::Verify(_))));
-        assert!(kept_a.is_some());
-        // The dialer sent no tag.
-        let nothing = tokio::time::timeout(std::time::Duration::from_millis(100), cb.read_msg()).await;
-        assert!(nothing.is_err(), "no tag must be sent");
-    }
-
-    #[tokio::test]
-    async fn listener_identity_mismatch_keeps_session() {
-        let (alice, bob, mallory) = (kp(), kp(), kp());
-        let (sa, _sb) = session_pair(&alice, &bob).await;
-        let mut kept_a = Some(sa);
-        let (mut ca, mut cb) = mem_pair();
-        // Identity is Mallory's, not the ticket's (Bob's).
-        let fake = fake_listener(&mut cb, |_| challenge_bytes(&[5u8; 32], &[0u8; TAG_LEN], &mallory.public()));
-        let bid = pid(&bob);
-        let (res, _) = tokio::join!(dialer_negotiate(&mut ca, &alice, &bid, &mut kept_a), fake);
-        assert!(matches!(res, Err(Error::Verify(_))));
-        assert!(kept_a.is_some());
-    }
-
-    #[tokio::test]
-    async fn legacy_decision_resumed_rejected() {
-        let (alice, bob) = (kp(), kp());
-        let (sa, _sb) = session_pair(&alice, &bob).await;
-        let mut kept_a = Some(sa);
-        let (mut ca, mut cb) = mem_pair();
-        let fake = fake_listener(&mut cb, |_| {
-            let mut v = vec![DECISION_RESUMED];
-            v.extend_from_slice(&bob.public().to_bytes());
-            v
-        });
-        let bid = pid(&bob);
-        let (res, _) = tokio::join!(dialer_negotiate(&mut ca, &alice, &bid, &mut kept_a), fake);
-        assert!(res.is_err());
-        assert!(kept_a.is_some());
-    }
-
-    #[tokio::test]
-    async fn challenge_without_kept_session_errors() {
-        let (alice, bob) = (kp(), kp());
-        let mut kept_a: Option<SecureSession> = None;
-        let (mut ca, mut cb) = mem_pair();
-        let fake = fake_listener(&mut cb, |_| challenge_bytes(&[5u8; 32], &[0u8; TAG_LEN], &bob.public()));
-        let bid = pid(&bob);
-        let (res, _) = tokio::join!(dialer_negotiate(&mut ca, &alice, &bid, &mut kept_a), fake);
-        assert!(res.is_err());
-    }
-
-    #[tokio::test]
-    async fn resume_happy_path_both_directions() {
-        let (alice, bob) = (kp(), kp());
-        let (sa, sb) = session_pair(&alice, &bob).await;
-        let mut kept_a = Some(sa);
-        let kept_b = kept_with(&alice, sb).await;
-
-        let (mut ca, mut cb) = mem_pair();
-        let bid = pid(&bob);
-        let (rd, rl) = tokio::join!(
-            dialer_negotiate(&mut ca, &alice, &bid, &mut kept_a),
-            listener_negotiate(&mut cb, &bob, &kept_b)
-        );
-        let mut sa = match rd {
-            Ok(DialerOutcome::Resume { session, .. }) => session,
-            _ => panic!("dialer should resume"),
-        };
-        let mut sb = match rl {
-            Ok(ListenerOutcome::Resume { session, .. }) => session,
-            _ => panic!("listener should resume"),
-        };
-        assert!(kept_a.is_none());
-        assert!(kept_b.lock().await.is_empty());
-
-        let ct = sa.seal(b"hello bob").unwrap();
-        assert_eq!(sb.open(&ct).unwrap(), b"hello bob");
-        let ct = sb.seal(b"hello alice").unwrap();
-        assert_eq!(sa.open(&ct).unwrap(), b"hello alice");
     }
 
     // --- passphrase / size ---------------------------------------------------
@@ -1390,24 +1157,331 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn sealed_max_message_fits_frame() {
+    /// A fresh handshake pair (device keys, no transport): (a's session, b's session).
+    fn session_pair(a: &Keypair, b: &Keypair) -> (SecureSession, SecureSession) {
+        let (m1, pending) = SecureSession::initiate(a, b.public(), b"").unwrap();
+        let (m2, sb) = SecureSession::respond(b, a.public(), b"", &m1).unwrap();
+        (pending.finish(&m2).unwrap(), sb)
+    }
+
+    #[test]
+    fn sealed_max_message_fits_frame() {
         let big = vec![0xabu8; MAX_MESSAGE_BYTES];
         let (alice, bob) = (kp(), kp());
 
         // First message on a fresh pair, from each side in turn.
-        let (mut sa, _sb) = session_pair(&alice, &bob).await;
+        let (mut sa, _sb) = session_pair(&alice, &bob);
         assert!(sa.seal(&big).unwrap().len() <= MAX_FRAME_BYTES);
-        let (_sa, mut sb) = session_pair(&alice, &bob).await;
+        let (_sa, mut sb) = session_pair(&alice, &bob);
         assert!(sb.seal(&big).unwrap().len() <= MAX_FRAME_BYTES);
 
         // After one message in each direction.
-        let (mut sa, mut sb) = session_pair(&alice, &bob).await;
+        let (mut sa, mut sb) = session_pair(&alice, &bob);
         let ct = sa.seal(b"ping").unwrap();
         sb.open(&ct).unwrap();
         let ct = sb.seal(b"pong").unwrap();
         sa.open(&ct).unwrap();
         assert!(sa.seal(&big).unwrap().len() <= MAX_FRAME_BYTES);
         assert!(sb.seal(&big).unwrap().len() <= MAX_FRAME_BYTES);
+    }
+
+    // --- root fingerprint ----------------------------------------------------
+
+    #[test]
+    fn generated_fingerprint_is_the_root_fingerprint() {
+        let generated = generate_identity().unwrap();
+        let root = Keypair::from_mnemonic(CryptoSuite::Hybrid, &generated.mnemonic).unwrap();
+        assert_eq!(generated.fingerprint, root.peer_id().fingerprint());
+        assert_eq!(generated.peer_id_hex, hex::encode(root.peer_id().0));
+        let fp = &generated.fingerprint;
+        assert_eq!(fp.len(), 49, "{fp}");
+        let groups: Vec<&str> = fp.split(' ').collect();
+        assert_eq!(groups.len(), 10, "{fp}");
+        for g in groups {
+            assert_eq!(g.len(), 4, "{fp}");
+            assert!(
+                g.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "{fp}"
+            );
+        }
+        let summary = summarize_mnemonic(&generated.mnemonic).unwrap();
+        assert_eq!(summary.fingerprint, generated.fingerprint);
+    }
+
+    // --- device key at rest --------------------------------------------------
+
+    const PASS: &str = "device passphrase";
+    const T0: u64 = 1_700_000_000;
+
+    fn lifetime() -> u64 {
+        wire::DEVICE_CERT_LIFETIME.as_secs()
+    }
+
+    fn window() -> u64 {
+        wire::DEVICE_RENEW_WINDOW.as_secs()
+    }
+
+    fn fresh_dir(tag: &str) -> String {
+        let dir = tmp_dir(tag);
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn read_both(dir: &str) -> (Vec<u8>, Vec<u8>) {
+        (
+            std::fs::read(device_path(dir)).unwrap(),
+            std::fs::read(device_cert_path(dir)).unwrap(),
+        )
+    }
+
+    #[test]
+    fn device_provisioned_on_fresh_dir_0600_and_verifies() {
+        let dir = fresh_dir("dev-fresh");
+        let root = kp();
+        let c = load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        assert!(device_path(&dir).exists());
+        assert!(device_cert_path(&dir).exists());
+        assert!(!temp_path(&device_path(&dir)).exists());
+        assert!(!temp_path(&device_cert_path(&dir)).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for p in [device_path(&dir), device_cert_path(&dir)] {
+                let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{}", p.display());
+            }
+        }
+        assert_ne!(c.device.peer_id(), root.peer_id());
+        assert_eq!(c.root.peer_id(), root.peer_id());
+        assert!(c.cert.verify(root.public(), T0));
+        assert_eq!(c.cert.device().peer_id(), c.device.peer_id());
+        assert_eq!(c.cert.not_after(), T0 + lifetime());
+        assert!(c.revocation.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_reload_is_stable() {
+        let dir = fresh_dir("dev-stable");
+        let root = kp();
+        let a = load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        let before = read_both(&dir);
+        let b = load_or_provision_device(&dir, PASS, &root, T0 + 60).unwrap();
+        assert_eq!(a.device.peer_id(), b.device.peer_id());
+        assert_eq!(a.cert.not_after(), b.cert.not_after());
+        assert_eq!(read_both(&dir), before, "no renewal, nothing rewritten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_cert_renews_at_window_boundary_and_when_expired() {
+        let dir = fresh_dir("dev-renew");
+        let root = kp();
+        let first = load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        let na = first.cert.not_after();
+
+        // One second outside the window: not renewed.
+        let now = na - window() - 1;
+        let c = load_or_provision_device(&dir, PASS, &root, now).unwrap();
+        assert_eq!(c.cert.not_after(), na);
+
+        // Exactly at the window: renewed for a full lifetime from `now`.
+        let now = na - window();
+        let c = load_or_provision_device(&dir, PASS, &root, now).unwrap();
+        assert_eq!(c.cert.not_after(), now + lifetime());
+        assert_eq!(c.device.peer_id(), first.device.peer_id(), "same device key");
+        // The renewal is persisted.
+        let again = load_or_provision_device(&dir, PASS, &root, now).unwrap();
+        assert_eq!(again.cert.not_after(), now + lifetime());
+
+        // Expired: renewed.
+        let na2 = again.cert.not_after();
+        let now = na2 + 1;
+        let c = load_or_provision_device(&dir, PASS, &root, now).unwrap();
+        assert_eq!(c.cert.not_after(), now + lifetime());
+        assert!(c.cert.verify(root.public(), now));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_wrong_passphrase_fails_and_leaves_files() {
+        let dir = fresh_dir("dev-wrongpass");
+        let root = kp();
+        load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        let before = read_both(&dir);
+        assert!(load_or_provision_device(&dir, "another passphrase", &root, T0).is_err());
+        // Even when a renewal would be due.
+        let far = T0 + lifetime() + 10;
+        assert!(load_or_provision_device(&dir, "another passphrase", &root, far).is_err());
+        assert_eq!(read_both(&dir), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_corrupt_key_fails_closed() {
+        let dir = fresh_dir("dev-corrupt");
+        let root = kp();
+        load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        std::fs::write(device_path(&dir), b"not an age file").unwrap();
+        assert!(load_or_provision_device(&dir, PASS, &root, T0).is_err());
+        assert_eq!(std::fs::read(device_path(&dir)).unwrap(), b"not an age file");
+
+        // Valid age, but not a mnemonic.
+        std::fs::write(device_path(&dir), encrypt(PASS, b"not a mnemonic").unwrap()).unwrap();
+        let before = std::fs::read(device_path(&dir)).unwrap();
+        assert!(load_or_provision_device(&dir, PASS, &root, T0).is_err());
+        assert_eq!(std::fs::read(device_path(&dir)).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_orphan_cert_fails_closed() {
+        let dir = fresh_dir("dev-orphan");
+        let root = kp();
+        load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        std::fs::remove_file(device_path(&dir)).unwrap();
+        let cert_before = std::fs::read(device_cert_path(&dir)).unwrap();
+        assert!(load_or_provision_device(&dir, PASS, &root, T0).is_err());
+        assert!(!device_path(&dir).exists(), "no new device key provisioned");
+        assert_eq!(std::fs::read(device_cert_path(&dir)).unwrap(), cert_before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_files_from_another_root_fail_closed() {
+        let dir = fresh_dir("dev-otherroot");
+        let (root, other) = (kp(), kp());
+        load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        let before = read_both(&dir);
+        assert!(load_or_provision_device(&dir, PASS, &other, T0).is_err());
+        assert_eq!(read_both(&dir), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_cert_for_another_device_fails_closed() {
+        let dir = fresh_dir("dev-otherdev");
+        let root = kp();
+        load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        let stranger = kp();
+        let cert = root.authorize_device(stranger.public(), T0 + lifetime()).unwrap();
+        std::fs::write(device_cert_path(&dir), encrypt(PASS, &cert.to_bytes()).unwrap()).unwrap();
+        let before = read_both(&dir);
+        assert!(load_or_provision_device(&dir, PASS, &root, T0).is_err());
+        assert_eq!(read_both(&dir), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_missing_cert_is_reissued() {
+        let dir = fresh_dir("dev-nocert");
+        let root = kp();
+        let a = load_or_provision_device(&dir, PASS, &root, T0).unwrap();
+        std::fs::remove_file(device_cert_path(&dir)).unwrap();
+        let b = load_or_provision_device(&dir, PASS, &root, T0 + 5).unwrap();
+        assert_eq!(a.device.peer_id(), b.device.peer_id());
+        assert_eq!(b.cert.not_after(), T0 + 5 + lifetime());
+        assert!(device_cert_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn node_load_migrates_identity_only_install() {
+        let dir = fresh_dir("dev-migrate");
+        let id = generate_identity().unwrap();
+        store_identity(&dir, &id.mnemonic, PASS).unwrap();
+        assert!(!device_path(&dir).exists());
+        let node = LatticeNode::load(&dir, PASS).expect("migration succeeds");
+        assert!(device_path(&dir).exists());
+        assert!(device_cert_path(&dir).exists());
+        assert_eq!(node.peer_id_hex(), id.peer_id_hex);
+        assert_eq!(node.fingerprint(), id.fingerprint);
+        assert_ne!(node.creds.device.peer_id().0, node.root.peer_id().0);
+        // A second load reuses the same device key.
+        let device = node.creds.device.peer_id();
+        drop(node);
+        let node = LatticeNode::load(&dir, PASS).unwrap();
+        assert_eq!(node.creds.device.peer_id(), device);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn node_load_wrong_passphrase_creates_no_device_files() {
+        let dir = fresh_dir("dev-nofiles");
+        let id = generate_identity().unwrap();
+        store_identity(&dir, &id.mnemonic, PASS).unwrap();
+        assert!(LatticeNode::load(&dir, "wrong passphrase").is_err());
+        assert!(!device_path(&dir).exists());
+        assert!(!device_cert_path(&dir).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- tickets -------------------------------------------------------------
+
+    fn test_creds() -> DeviceCreds {
+        let (root, device) = (kp(), kp());
+        let cert = root.authorize_device(device.public(), T0).unwrap();
+        DeviceCreds {
+            device,
+            root: root.public().clone(),
+            cert,
+            revocation: None,
+        }
+    }
+
+    #[test]
+    fn ticket_for_roundtrips_through_parse_ticket() {
+        let ep = kp().public().ed25519_bytes();
+        let addr = TicketAddr::from_parts(
+            &ep,
+            &["https://relay.example.org./"],
+            &["192.0.2.1:4433".parse().unwrap()],
+        )
+        .unwrap();
+        let c = test_creds();
+        let t = parse_ticket(&ticket_for(&addr, &c).unwrap()).unwrap();
+        assert_eq!(t.root_id, c.root.peer_id().0);
+        assert_eq!(t.device_id, c.device.peer_id().0);
+        assert_eq!(t.endpoint_id, ep);
+    }
+
+    /// A hex ticket whose first byte is the old version 2.
+    fn v2_ticket() -> String {
+        format!("02{}", "00".repeat(80))
+    }
+
+    #[test]
+    fn parse_ticket_rejects_v2_with_version_message() {
+        let e = parse_ticket(&v2_ticket()).unwrap_err();
+        assert!(e.to_string().contains("version 2"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn connect_with_bad_tickets_emits_one_bad_ticket_and_stays_unbound() {
+        let dir = fresh_dir("bad-ticket");
+        let id = generate_identity().unwrap();
+        store_identity(&dir, &id.mnemonic, PASS).unwrap();
+        let node = LatticeNode::load(&dir, PASS).unwrap();
+
+        for (ticket, needle) in [(v2_ticket(), "version 2"), ("not hex".to_string(), "hex")] {
+            node.connect(ticket);
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(5), node.next_event())
+                .await
+                .expect("an event is emitted")
+                .expect("stream open");
+            match ev {
+                NodeEvent::BadTicket { message } => {
+                    assert!(message.contains(needle), "{message}")
+                }
+                other => panic!("expected BadTicket, got {other:?}"),
+            }
+            // Exactly one event, and nothing was dialed or bound.
+            let more =
+                tokio::time::timeout(std::time::Duration::from_millis(300), node.next_event()).await;
+            assert!(more.is_err(), "unexpected extra event: {more:?}");
+            assert!(node.transport.try_lock().unwrap().is_none(), "transport stays unbound");
+            assert!(node.dial_task.try_lock().unwrap().is_none(), "no dial loop started");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
